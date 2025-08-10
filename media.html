@@ -1,0 +1,557 @@
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>DevCommandHub Chat</title>
+   <style>
+       :root {
+           --vscode-font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+           --vscode-font-size: 13px;
+           --vscode-sideBar-background: #252526;
+           --vscode-sideBar-foreground: #cccccc;
+           --vscode-sideBar-border: #2d2d30;
+           --vscode-sideBarTitle-foreground: #cccccc;
+           --vscode-icon-foreground: #c5c5c5;
+           --vscode-toolbar-hoverBackground: #2a2d2e;
+           --vscode-list-hoverBackground: #2a2d2e;
+           --vscode-charts-blue: #007acc;
+           --vscode-foreground: #cccccc;
+           --vscode-symbolIcon-functionForeground: #dcdcaa;
+           --vscode-descriptionForeground: #9d9d9d;
+           --vscode-textCodeBlock-background: #1e1e1e;
+           --vscode-textPreformat-foreground: #d4d4d4;
+           --vscode-textBlockQuote-border: #404040;
+           --vscode-editor-font-family: 'Consolas', 'Courier New', monospace;
+           --vscode-panel-border: #2d2d30;
+           --vscode-button-border: #464647;
+           --vscode-button-hoverBackground: #464647;
+           --vscode-input-background: #3c3c3c;
+           --vscode-input-border: #464647;
+           --vscode-focusBorder: #007fd4;
+           --vscode-input-foreground: #cccccc;
+           --vscode-input-placeholderForeground: #9d9d9d;
+           --vscode-scrollbarSlider-background: #79797966;
+           --vscode-scrollbarSlider-hoverBackground: #646464b3;
+       }
+
+
+       body {
+           font-family: var(--vscode-font-family);
+           font-size: var(--vscode-font-size);
+           background: var(--vscode-sideBar-background);
+           color: var(--vscode-sideBar-foreground);
+           margin: 0;
+           padding: 0;
+           height: 100vh;
+           display: flex;
+           flex-direction: column;
+       }
+
+
+       .chat-header {
+           display: flex;
+           align-items: center;
+           justify-content: space-between;
+           padding: 8px 16px;
+           background: var(--vscode-sideBar-background);
+           border-bottom: 1px solid var(--vscode-sideBar-border);
+           min-height: 35px;
+       }
+
+
+       .chat-title {
+           font-size: 11px;
+           font-weight: 600;
+           color: var(--vscode-sideBarTitle-foreground);
+           text-transform: uppercase;
+           letter-spacing: 0.5px;
+       }
+
+
+       .chat-actions {
+           display: flex;
+           gap: 4px;
+       }
+
+
+       .action-button {
+           width: 22px;
+           height: 22px;
+           background: transparent;
+           border: none;
+           border-radius: 3px;
+           color: var(--vscode-icon-foreground);
+           cursor: pointer;
+           display: flex;
+           align-items: center;
+           justify-content: center;
+           font-size: 12px;
+       }
+
+
+       .action-button:hover {
+           background: var(--vscode-toolbar-hoverBackground);
+       }
+
+
+       .chat-container {
+           flex: 1;
+           overflow-y: auto;
+           display: flex;
+           flex-direction: column;
+       }
+
+
+       .conversation-item {
+           padding: 12px 16px;
+           border-bottom: 1px solid var(--vscode-sideBar-border);
+           display: flex;
+           flex-direction: column;
+           gap: 8px;
+       }
+
+
+       .conversation-item:hover {
+           background: var(--vscode-list-hoverBackground);
+       }
+
+
+       .user-message {
+           display: flex;
+           align-items: flex-start;
+           gap: 8px;
+       }
+
+
+       .user-avatar {
+           width: 20px;
+           height: 20px;
+           border-radius: 50%;
+           background: var(--vscode-charts-blue);
+           color: white;
+           display: flex;
+           align-items: center;
+           justify-content: center;
+           font-size: 10px;
+           font-weight: bold;
+           flex-shrink: 0;
+       }
+
+
+       .user-name {
+           font-size: 12px;
+           font-weight: 600;
+           color: var(--vscode-foreground);
+           margin-bottom: 4px;
+       }
+
+
+       .user-message-content {
+           font-size: 13px;
+           color: var(--vscode-foreground);
+           line-height: 1.4;
+       }
+
+
+       .bot-response {
+           margin-left: 0;
+           padding-left: 0;
+       }
+
+
+       .copilot-header {
+           display: flex;
+           align-items: center;
+           gap: 8px;
+           margin-bottom: 8px;
+       }
+
+
+       .copilot-icon {
+           width: 16px;
+           height: 16px;
+           background: var(--vscode-symbolIcon-functionForeground);
+           border-radius: 3px;
+           display: flex;
+           align-items: center;
+           justify-content: center;
+           color: white;
+           font-size: 10px;
+           font-weight: bold;
+       }
+
+
+       .copilot-label {
+           font-size: 12px;
+           font-weight: 600;
+           color: var(--vscode-foreground);
+       }
+
+
+       .copilot-meta {
+           font-size: 11px;
+           color: var(--vscode-descriptionForeground);
+           margin-left: auto;
+       }
+
+
+       .bot-message-content {
+           font-size: 13px;
+           line-height: 1.5;
+           color: var(--vscode-foreground);
+       }
+
+
+       .bot-message-content code {
+           background: var(--vscode-textCodeBlock-background);
+           color: var(--vscode-textPreformat-foreground);
+           padding: 1px 4px;
+           border-radius: 3px;
+           font-family: var(--vscode-editor-font-family);
+           font-size: 12px;
+       }
+
+
+       .code-block {
+           background: var(--vscode-textCodeBlock-background);
+           border: 1px solid var(--vscode-textBlockQuote-border);
+           border-radius: 4px;
+           padding: 12px;
+           margin: 8px 0;
+           font-family: var(--vscode-editor-font-family);
+           font-size: 12px;
+           color: var(--vscode-textPreformat-foreground);
+           overflow-x: auto;
+           white-space: pre;
+       }
+
+
+       .input-section {
+           border-top: 1px solid var(--vscode-panel-border);
+           background: var(--vscode-sideBar-background);
+           padding: 12px 16px;
+       }
+
+
+       .add-context-row {
+           display: flex;
+           align-items: center;
+           gap: 8px;
+           margin-bottom: 8px;
+           font-size: 11px;
+           color: var(--vscode-descriptionForeground);
+       }
+
+
+       .add-context-button {
+           background: transparent;
+           border: 1px solid var(--vscode-button-border);
+           border-radius: 4px;
+           padding: 4px 8px;
+           font-size: 11px;
+           color: var(--vscode-foreground);
+           cursor: pointer;
+           display: flex;
+           align-items: center;
+           gap: 4px;
+       }
+
+
+       .add-context-button:hover {
+           background: var(--vscode-button-hoverBackground);
+       }
+
+
+       .current-file {
+           display: flex;
+           align-items: center;
+           gap: 4px;
+           font-size: 11px;
+           color: var(--vscode-descriptionForeground);
+           margin-left: auto;
+       }
+
+
+       .input-container {
+           display: flex;
+           align-items: flex-end;
+           gap: 8px;
+           background: var(--vscode-input-background);
+           border: 1px solid var(--vscode-input-border);
+           border-radius: 6px;
+           padding: 8px 12px;
+           min-height: 18px;
+       }
+
+
+       .input-container:focus-within {
+           border-color: var(--vscode-input-border);
+           outline: none;
+       }
+
+
+       .input-field {
+           flex: 1;
+           background: transparent;
+           border: none;
+           outline: none;
+           color: var(--vscode-input-foreground);
+           font-family: var(--vscode-font-family);
+           font-size: 13px;
+           resize: none;
+           min-height: 18px;
+           max-height: 120px;
+           overflow-y: auto;
+       }
+
+
+       .input-field:focus {
+           outline: none;
+       }
+
+
+       .input-actions {
+           display: flex;
+           gap: 4px;
+           align-items: center;
+       }
+
+
+       .input-action {
+           width: 20px;
+           height: 20px;
+           background: transparent;
+           border: none;
+           color: var(--vscode-icon-foreground);
+           cursor: pointer;
+           border-radius: 3px;
+           display: flex;
+           align-items: center;
+           justify-content: center;
+           font-size: 12px;
+       }
+
+
+       .input-action:hover {
+           background: var(--vscode-toolbar-hoverBackground);
+       }
+
+
+       .input-action:disabled {
+           opacity: 0.5;
+           cursor: not-allowed;
+       }
+
+
+       /* Scrollbar styling */
+       .chat-container::-webkit-scrollbar {
+           width: 8px;
+       }
+
+
+       .chat-container::-webkit-scrollbar-track {
+           background: transparent;
+       }
+
+
+       .chat-container::-webkit-scrollbar-thumb {
+           background: var(--vscode-scrollbarSlider-background);
+           border-radius: 4px;
+       }
+
+
+       .chat-container::-webkit-scrollbar-thumb:hover {
+           background: var(--vscode-scrollbarSlider-hoverBackground);
+       }
+   </style>
+</head>
+<body>
+   <div class="chat-header">
+       <div class="chat-title">Chat</div>
+       <div class="chat-actions">
+           <button class="action-button" title="New Chat">↻</button>
+           <button class="action-button" title="Clear Chat">🗑</button>
+           <button class="action-button" title="More">⋯</button>
+       </div>
+   </div>
+  
+   <div class="chat-container" id="chatContainer">
+       <!-- Messages will be added here -->
+   </div>
+  
+   <div class="input-section">
+       <div class="add-context-row">
+           <button class="add-context-button" id="addContextBtn">
+               📎 Add Context...
+           </button>
+           <div class="current-file">
+               📄 extension.ts Current file
+           </div>
+       </div>
+      
+       <div class="input-container">
+           <textarea
+               class="input-field"
+               id="inputField"
+               placeholder="Ask a Question"
+               rows="1"
+           ></textarea>
+           <div class="input-actions">
+               <button class="input-action" id="attachBtn" title="Attach">📎</button>
+               <button class="input-action" id="mentionBtn" title="Mention">@</button>
+               <button class="input-action" id="askBtn" title="Ask" disabled>Ask</button>
+               <button class="input-action" id="submitBtn" title="Submit" disabled>▶</button>
+           </div>
+       </div>
+   </div>
+
+
+   <script>
+       const chatContainer = document.getElementById('chatContainer');
+       const inputField = document.getElementById('inputField');
+       const askBtn = document.getElementById('askBtn');
+       const submitBtn = document.getElementById('submitBtn');
+       let conversationCount = 0;
+
+
+       // Auto-resize textarea
+       inputField.addEventListener('input', function() {
+           this.style.height = 'auto';
+           this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+          
+           const hasText = this.value.trim().length > 0;
+           askBtn.disabled = !hasText;
+           submitBtn.disabled = !hasText;
+       });
+
+
+       // Handle Enter key
+       inputField.addEventListener('keydown', function(e) {
+           if (e.key === 'Enter' && !e.shiftKey) {
+               e.preventDefault();
+               sendMessage();
+           }
+       });
+
+
+       // Handle button clicks
+       askBtn.addEventListener('click', sendMessage);
+       submitBtn.addEventListener('click', sendMessage);
+
+
+       function sendMessage() {
+           const text = inputField.value.trim();
+           if (!text) return;
+
+
+           addConversation(text);
+          
+           // Clear input
+           inputField.value = '';
+           inputField.style.height = 'auto';
+           askBtn.disabled = true;
+           submitBtn.disabled = true;
+       }
+
+
+       function addConversation(userMessage) {
+           const conversationItem = document.createElement('div');
+           conversationItem.className = 'conversation-item';
+
+
+           // User message
+           const userDiv = document.createElement('div');
+           userDiv.className = 'user-message';
+          
+           const avatar = document.createElement('div');
+           avatar.className = 'user-avatar';
+           avatar.textContent = 'A';
+          
+           const messageContent = document.createElement('div');
+           const userName = document.createElement('div');
+           userName.className = 'user-name';
+           userName.textContent = 'aaron-gheevarghese';
+          
+           const userText = document.createElement('div');
+           userText.className = 'user-message-content';
+           userText.textContent = userMessage;
+          
+           messageContent.appendChild(userName);
+           messageContent.appendChild(userText);
+           userDiv.appendChild(avatar);
+           userDiv.appendChild(messageContent);
+
+
+           // Bot response
+           const botDiv = document.createElement('div');
+           botDiv.className = 'bot-response';
+          
+           const copilotHeader = document.createElement('div');
+           copilotHeader.className = 'copilot-header';
+          
+           const copilotIcon = document.createElement('div');
+           copilotIcon.className = 'copilot-icon';
+           copilotIcon.textContent = '⚡';
+          
+           const copilotLabel = document.createElement('div');
+           copilotLabel.className = 'copilot-label';
+           copilotLabel.textContent = 'DevCommandHub';
+          
+           const copilotMeta = document.createElement('div');
+           copilotMeta.className = 'copilot-meta';
+           copilotMeta.textContent = 'Used 1 reference';
+          
+           copilotHeader.appendChild(copilotIcon);
+           copilotHeader.appendChild(copilotLabel);
+           copilotHeader.appendChild(copilotMeta);
+          
+           const botText = document.createElement('div');
+           botText.className = 'bot-message-content';
+          
+           // Simulate different types of responses
+           if (userMessage.toLowerCase().includes('html') || userMessage.toLowerCase().includes('function')) {
+               botText.innerHTML = `You can return containing your HTML markup from the <code>getHTML</code> function. Here's a simple example that creates a basic webview with a heading and a button:
+
+
+<div class="code-block">function getHTML(): string {
+ return \`<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta charset="UTF-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1.0">
+ <title>DevCommandHub Panel</title>
+ <style>
+   body { font-family: sans-serif; padding: 20px; }
+   button { padding: 8px 16px; font-size: 16px; }
+ </style>
+</head>
+<body>
+ <h1>Welcome to DevCommandHub!</h1>
+ <button onclick="alert('Button clicked!')">Click me</button>
+</body>
+</html>\`;
+}</div>`;
+           } else {
+               botText.textContent = "I'm a demo assistant. I can help you with coding questions, explain concepts, and assist with development tasks!";
+           }
+          
+           botDiv.appendChild(copilotHeader);
+           botDiv.appendChild(botText);
+
+
+           conversationItem.appendChild(userDiv);
+           conversationItem.appendChild(botDiv);
+          
+           chatContainer.appendChild(conversationItem);
+           chatContainer.scrollTop = chatContainer.scrollHeight;
+       }
+
+
+       // Focus input on load
+       inputField.focus();
+   </script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+{
+  "name": "devcommandhub",
+  "displayName": "devcommandhub",
+  "description": "DevCommandHub is a Visual Studio Code extension that acts as a chat-style DevOps assistant.",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.102.0" },
+
+  "main": "./out/extension.js",
+  "activationEvents": ["onCommand:devcommandhub.openWindow"],
+
+  "categories": ["Other"],
+  "contributes": {
+    "commands": [
+      { "command": "devcommandhub.openWindow", "title": "DevCommandHub: Open Window" }
+    ]
+  },
+
+  "scripts": {
+    "clean": "rimraf out",
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "1.102.0",
+    "@typescript-eslint/eslint-plugin": "^8.39.0",
+    "@typescript-eslint/parser": "^8.39.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.32.0",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.9.2"
+  }
+}
