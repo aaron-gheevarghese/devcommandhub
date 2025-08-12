@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+import supabaseService from './services/supabase';
 
 // Load environment variables
 dotenv.config();
@@ -25,13 +26,16 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
   next();
 });
 
-// Health check endpoint
-app.get('/health', (req: express.Request, res: express.Response) => {
+// Health check endpoint (with database test)
+app.get('/health', async (req: express.Request, res: express.Response) => {
+  const dbConnected = await supabaseService.testConnection();
+  
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
     service: 'DevCommandHub API',
-    version: '1.0.0'
+    version: '1.0.0',
+    database: dbConnected ? 'connected' : 'disconnected'
   });
 });
 
