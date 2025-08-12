@@ -3,10 +3,10 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
-import supabaseService from './services/supabase';
-
 // Load environment variables
 dotenv.config();
+
+import { supabaseService } from './services/supabase';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -46,6 +46,18 @@ app.get('/api', (req: express.Request, res: express.Response) => {
     endpoints: {
       health: 'GET /health',
       commands: 'POST /api/commands (coming soon!)'
+    }
+  });
+});
+
+// Temporary debug endpoint - REMOVE THIS LATER
+app.get('/debug', (req: express.Request, res: express.Response) => {
+  res.json({
+    env_check: {
+      has_supabase_url: !!process.env.SUPABASE_URL,
+      has_supabase_service_key: !!process.env.SUPABASE_SERVICE_KEY,
+      supabase_url_preview: process.env.SUPABASE_URL ? 
+        process.env.SUPABASE_URL.substring(0, 30) + '...' : 'missing'
     }
   });
 });
