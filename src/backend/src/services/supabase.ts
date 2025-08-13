@@ -1,10 +1,14 @@
 // src/backend/src/services/supabase.ts
+import path from 'path';
 import dotenv from 'dotenv';
-dotenv.config();
 
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+// 👇 force-load the backend .env regardless of where you start the server from
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-// Database types based on our jobs table schema
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+
+
+// ---------- Types (jobs table) ----------
 export interface Job {
   id: string;
   user_id: string;
@@ -32,28 +36,44 @@ export interface CreateJobData {
   max_retries?: number;
 }
 
+// ---------- Env + raw admin client ----------
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
+
+if (!supabaseUrl || !supabaseServiceKey) {
+  throw new Error('Missing Supabase environment variables. Check your .env (SUPABASE_URL, SUPABASE_SERVICE_KEY).');
+}
+
+/**
+ * Raw admin client (SERVICE ROLE). Backend-only. Bypasses RLS.
+ * Use this for admin operations (debug_auth RPC, admin.createUser, internal maintenance).
+ */
+export const supabaseAdmin: SupabaseClient = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: { autoRefreshToken: false, persistSession: false },
+  global: { headers: { 'X-Client-Info': 'devcommandhub-backend/0.1.0' } },
+});
+
+// ---------- Service wrapper (uses the same admin client) ----------
 class SupabaseService {
   private supabase: SupabaseClient;
-  
-  constructor() {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
-    
-    if (!supabaseUrl || !supabaseServiceKey) {
-      throw new Error('Missing Supabase environment variables. Check your .env file.');
-    }
-    
-    this.supabase = createClient(supabaseUrl, supabaseServiceKey, {
-      auth: { autoRefreshToken: false, persistSession: false }
-    });
+
+  constructor(client: SupabaseClient) {
+    // Reuse the admin client to keep a single connection/role source of truth
+    this.supabase = client;
   }
-  
+
+  getClient(): SupabaseClient {
+    return this.supabase;
+  }
+
+  // Optional passthrough for RPCs if you want to keep calling via the service
+  async rpc(fn: string, args?: Record<string, unknown>) {
+    return this.supabase.rpc(fn, args ?? {});
+  }
+
   async testConnection(): Promise<boolean> {
     try {
-      const { error } = await this.supabase
-        .from('jobs')
-        .select('count')
-        .limit(1);
+      const { error } = await this.supabase.from('jobs').select('count').limit(1);
       if (error) {
         console.error('Supabase connection test failed:', error);
         return false;
@@ -65,7 +85,7 @@ class SupabaseService {
       return false;
     }
   }
-  
+
   async createJob(jobData: CreateJobData): Promise<Job | null> {
     try {
       const { data, error } = await this.supabase
@@ -79,10 +99,11 @@ class SupabaseService {
           output: [],
           logs: {},
           retry_count: 0,
-          max_retries: jobData.max_retries || 3
+          max_retries: jobData.max_retries ?? 3,
         })
         .select()
         .single();
+
       if (error) {
         console.error('Error creating job:', error);
         return null;
@@ -94,14 +115,10 @@ class SupabaseService {
       return null;
     }
   }
-  
+
   async getJob(jobId: string): Promise<Job | null> {
     try {
-      const { data, error } = await this.supabase
-        .from('jobs')
-        .select('*')
-        .eq('id', jobId)
-        .single();
+      const { data, error } = await this.supabase.from('jobs').select('*').eq('id', jobId).single();
       if (error) {
         console.error('Error fetching job:', error);
         return null;
@@ -112,23 +129,25 @@ class SupabaseService {
       return null;
     }
   }
-  
-  async updateJobStatus(jobId: string, status: Job['status'], additionalData: Partial<Job> = {}): Promise<boolean> {
+
+  async updateJobStatus(
+    jobId: string,
+    status: Job['status'],
+    additionalData: Partial<Job> = {}
+  ): Promise<boolean> {
     try {
       const updateData: any = {
         status,
         updated_at: new Date().toISOString(),
-        ...additionalData
+        ...additionalData,
       };
       if (status === 'running') {
         updateData.started_at = new Date().toISOString();
       } else if (['completed', 'failed', 'cancelled'].includes(status)) {
         updateData.completed_at = new Date().toISOString();
       }
-      const { error } = await this.supabase
-        .from('jobs')
-        .update(updateData)
-        .eq('id', jobId);
+
+      const { error } = await this.supabase.from('jobs').update(updateData).eq('id', jobId);
       if (error) {
         console.error('Error updating job status:', error);
         return false;
@@ -140,7 +159,7 @@ class SupabaseService {
       return false;
     }
   }
-  
+
   async appendJobOutput(jobId: string, outputLine: string): Promise<boolean> {
     try {
       const job = await this.getJob(jobId);
@@ -150,11 +169,9 @@ class SupabaseService {
       const newOutput = [...job.output, outputLine];
       const { error } = await this.supabase
         .from('jobs')
-        .update({
-          output: newOutput,
-          updated_at: new Date().toISOString()
-        })
+        .update({ output: newOutput, updated_at: new Date().toISOString() })
         .eq('id', jobId);
+
       if (error) {
         console.error('Error appending job output:', error);
         return false;
@@ -165,7 +182,7 @@ class SupabaseService {
       return false;
     }
   }
-  
+
   async getUserJobs(userId: string, limit: number = 50): Promise<Job[]> {
     try {
       const { data, error } = await this.supabase
@@ -174,6 +191,7 @@ class SupabaseService {
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
         .limit(limit);
+
       if (error) {
         console.error('Error fetching user jobs:', error);
         return [];
@@ -184,11 +202,7 @@ class SupabaseService {
       return [];
     }
   }
-  
-  getClient(): SupabaseClient {
-    return this.supabase;
-  }
 }
 
-// ✅ Export **only** named export
-export const supabaseService = new SupabaseService();
+// ✅ Named exports
+export const supabaseService = new SupabaseService(supabaseAdmin);

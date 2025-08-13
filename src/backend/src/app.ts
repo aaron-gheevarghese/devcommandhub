@@ -4,75 +4,106 @@ import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { supabaseService } from './services/supabase';
-import { commandParser, ParsedIntent } from './services/commandParser';
+import { commandParser } from './services/commandParser';
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const VERSION = process.env.npm_package_version || '1.0.0';
+const TEST_USER_ID = process.env.TEST_USER_ID; // string | undefined
 
-// Security middleware
+// ---------- middleware ----------
 app.use(helmet());
-
-// CORS configuration
-app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'https://localhost:3000',
-    /^vscode-webview:\/\//
-  ],
-  credentials: true
-}));
-
-// Body parsing middleware
+app.use(
+  cors({
+    origin: ['http://localhost:3000', 'https://localhost:3000', /^vscode-webview:\/\//],
+    credentials: true,
+  })
+);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-
-// Request logging middleware
-app.use((req, res, next) => {
+app.use((req, _res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
 
-// Health check endpoint
-app.get('/health', async (req, res) => {
+// ---------- helpers ----------
+function jsonError(
+  res: express.Response,
+  status: number,
+  code: string,
+  message: string,
+  extra?: Record<string, unknown>
+) {
+  return res.status(status).json({ success: false, code, message, ...(extra || {}) });
+}
+
+function resolveUserId(
+  reqBodyUserId?: unknown,
+  allowMissing = false
+): { ok: true; userId: string } | { ok: false; res: express.Response; status: number } {
+  // prefer body user_id if it's a non-empty string; else fall back to TEST_USER_ID
+  const candidate =
+    (typeof reqBodyUserId === 'string' && reqBodyUserId.trim().length > 0
+      ? reqBodyUserId.trim()
+      : undefined) ?? TEST_USER_ID;
+
+  if (candidate && candidate.length > 0) {
+    return { ok: true, userId: candidate };
+  }
+
+  if (allowMissing) {
+    // caller will decide how to handle listing without user scope
+    // (we still avoid returning null to typed APIs)
+    return { ok: true, userId: '' };
+  }
+
+  // We will return a 400 with a helpful hint
+  // NOTE: we can't send here; callers will use this to craft a response.
+  // We'll return a marker object prompting caller to send a 400.
+  // (See usages below.)
+  return {
+    ok: false,
+    res: {} as express.Response,
+    status: 400,
+  };
+}
+
+// ---------- health ----------
+app.get('/health', async (_req, res) => {
   try {
     const dbStatus = await supabaseService.testConnection();
     res.json({
       status: 'healthy',
       timestamp: new Date().toISOString(),
       database: dbStatus ? 'connected' : 'disconnected',
-      version: process.env.npm_package_version || '1.0.0'
+      version: VERSION,
     });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      timestamp: new Date().toISOString(),
-      database: 'error',
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
+  } catch (error: any) {
+    jsonError(res, 500, 'HEALTH_ERROR', error?.message || 'Unknown error');
   }
 });
 
-// API info endpoint
-app.get('/api', (req, res) => {
+// ---------- api info ----------
+app.get('/api', (_req, res) => {
   res.json({
     name: 'DevCommandHub API',
-    version: '1.0.0',
+    version: VERSION,
     endpoints: {
       health: 'GET /health',
       commands: 'POST /api/commands',
       getJob: 'GET /api/jobs/:id',
       listJobs: 'GET /api/jobs',
-      supportedCommands: 'GET /api/commands/supported'
+      supportedCommands: 'GET /api/commands/supported',
+      debugRole: 'GET /debug/role',
     },
-    supportedCommands: commandParser.getSupportedCommands()
+    supportedCommands: commandParser.getSupportedCommands(),
   });
 });
 
-// Get supported commands
-app.get('/api/commands/supported', (req, res) => {
+// ---------- supported commands ----------
+app.get('/api/commands/supported', (_req, res) => {
   res.json({
     commands: commandParser.getSupportedCommands(),
     examples: [
@@ -80,106 +111,98 @@ app.get('/api/commands/supported', (req, res) => {
       'show logs for user-service',
       'scale api-service to 3',
       'rollback auth-service',
-      'status of database-service'
-    ]
+      'status of database-service',
+    ],
   });
 });
 
-// Process natural language commands
+// ---------- core: POST /api/commands ----------
 app.post('/api/commands', async (req, res) => {
   try {
     const { command, user_id } = req.body;
 
-    // Validation
     if (!command || typeof command !== 'string') {
-      return res.status(400).json({
-        success: false,
-        error: 'Command is required and must be a string'
-      });
+      return jsonError(res, 400, 'BAD_REQUEST', 'Command is required and must be a string');
     }
 
-    // For now, use a default user_id if not provided (later we'll get from auth)
-    const userId = user_id || '00000000-0000-0000-0000-000000000000';
+    // Require a real user id (no nulls). Either pass in request body or set TEST_USER_ID in .env
+    const uid = resolveUserId(user_id);
+    if (!uid.ok) {
+      return jsonError(
+        res,
+        400,
+        'MISSING_USER_ID',
+        'Provide "user_id" in the request body or set TEST_USER_ID in your .env.'
+      );
+    }
+    const userId = uid.userId; // string
 
-    // Parse the command
+    // Parse + validate
     const parseResult = commandParser.parseCommand(command);
-    
     if (!parseResult.success || !parseResult.intent) {
-      return res.status(400).json({
-        success: false,
-        error: parseResult.error || 'Failed to parse command',
-        suggestions: commandParser.getSupportedCommands()
+      return jsonError(res, 400, 'PARSE_ERROR', parseResult.error || 'Failed to parse command', {
+        suggestions: commandParser.getSupportedCommands(),
       });
     }
-
-    // Validate the parsed intent
     const validation = commandParser.validateIntent(parseResult.intent);
     if (!validation.valid) {
-      return res.status(400).json({
-        success: false,
-        error: validation.error,
-        parsed_intent: parseResult.intent
+      return jsonError(res, 400, 'VALIDATION_ERROR', validation.error || 'Invalid intent', {
+        parsed_intent: parseResult.intent,
       });
     }
 
-    // Create job in database - matching your existing supabaseService interface
+    // 🔎 Debug: check DB auth role on this code path
+    try {
+      const svcAny = supabaseService as any;
+      if (typeof svcAny.rpc === 'function') {
+        const dbg = await svcAny.rpc('debug_auth');
+        console.log('DEBUG_AUTH RPC:', dbg?.data || null, dbg?.error || null);
+      } else {
+        console.log('DEBUG_AUTH RPC: rpc() not exposed on supabaseService (skip)');
+      }
+    } catch (e) {
+      console.warn('DEBUG_AUTH RPC failed:', e);
+    }
+
+    // Create job via your service (types expect string)
     const job = await supabaseService.createJob({
       user_id: userId,
       original_command: command,
       parsed_intent: parseResult.intent,
-      job_type: parseResult.intent.action
-      // Note: removed 'status' as it's not in your CreateJobData interface
+      job_type: parseResult.intent.action,
     });
 
     if (!job) {
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to create job'
-      });
+      return jsonError(res, 500, 'INSERT_FAILED', 'Failed to create job');
     }
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       job_id: job.id,
-      command: command,
       parsed_intent: parseResult.intent,
       status: job.status,
-      created_at: job.created_at
+      created_at: job.created_at,
     });
-
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error processing command:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
+    return jsonError(res, 500, 'INTERNAL_ERROR', error?.message || 'Internal server error');
   }
 });
 
-// Get specific job by ID
+// ---------- GET /api/jobs/:id ----------
 app.get('/api/jobs/:id', async (req, res) => {
   try {
     const { id } = req.params;
-
     if (!id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Job ID is required'
-      });
+      return jsonError(res, 400, 'BAD_REQUEST', 'Job ID is required');
     }
 
-    // Use your existing getJob method (single parameter)
     const job = await supabaseService.getJob(id);
-
     if (!job) {
-      return res.status(404).json({
-        success: false,
-        error: 'Job not found'
-      });
+      return jsonError(res, 404, 'NOT_FOUND', 'Job not found');
     }
 
-    res.json({
+    return res.json({
       success: true,
       job: {
         id: job.id,
@@ -193,81 +216,86 @@ app.get('/api/jobs/:id', async (req, res) => {
         created_at: job.created_at,
         updated_at: job.updated_at,
         started_at: job.started_at,
-        completed_at: job.completed_at
-      }
+        completed_at: job.completed_at,
+      },
     });
-
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error fetching job:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
+    return jsonError(res, 500, 'INTERNAL_ERROR', error?.message || 'Internal server error');
   }
 });
 
-// List jobs for user
+// ---------- GET /api/jobs (with basic filtering) ----------
 app.get('/api/jobs', async (req, res) => {
   try {
-    const { user_id, limit, status } = req.query;
+    const { user_id, status, limit } = req.query;
+    const lim = limit ? Math.min(parseInt(limit as string, 10) || 50, 100) : 50;
 
-    // For now, use default user_id if not provided
-    const userId = (user_id as string) || '00000000-0000-0000-0000-000000000000';
+    const uid = resolveUserId(user_id, /* allowMissing */ false);
+    if (!uid.ok) {
+      return jsonError(
+        res,
+        400,
+        'MISSING_USER_ID',
+        'Provide "user_id" as a query param or set TEST_USER_ID in your .env.'
+      );
+    }
+    const userId = uid.userId; // string
 
-    const jobs = await supabaseService.getUserJobs(
-      userId, 
-      limit ? parseInt(limit as string, 10) : 50
-    );
+    const jobs = await supabaseService.getUserJobs(userId, lim); // expects string
+    const filtered = status ? jobs.filter((j: any) => j.status === status) : jobs;
 
-    // Filter by status if provided
-    const filteredJobs = status 
-      ? jobs.filter(job => job.status === status)
-      : jobs;
-
-    res.json({
+    return res.json({
       success: true,
-      jobs: filteredJobs.map(job => ({
-        id: job.id,
-        original_command: job.original_command,
-        job_type: job.job_type,
-        status: job.status,
-        created_at: job.created_at,
-        updated_at: job.updated_at,
-        completed_at: job.completed_at
+      count: filtered.length,
+      jobs: filtered.map((j: any) => ({
+        id: j.id,
+        original_command: j.original_command,
+        job_type: j.job_type,
+        status: j.status,
+        created_at: j.created_at,
+        updated_at: j.updated_at,
+        completed_at: j.completed_at,
       })),
-      count: filteredJobs.length
     });
-
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error listing jobs:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
+    return jsonError(res, 500, 'INTERNAL_ERROR', error?.message || 'Internal server error');
   }
 });
 
-// Debug endpoint (temporary - remove in production)
-app.get('/debug', (req, res) => {
+// ---------- debug: role ----------
+app.get('/debug/role', async (_req, res) => {
+  try {
+    const svcAny = supabaseService as any;
+    if (typeof svcAny.rpc !== 'function') {
+      return res.json({ success: true, debug_auth: { note: 'rpc() not exposed on supabaseService' } });
+    }
+    const { data, error } = await svcAny.rpc('debug_auth');
+    return res.json({ success: true, debug_auth: data || null, error: error || null });
+  } catch (error: any) {
+    return jsonError(res, 500, 'DEBUG_ROLE_ERROR', error?.message || 'Failed to run debug_auth()');
+  }
+});
+
+// ---------- env debug (safe) ----------
+app.get('/debug', (_req, res) => {
   res.json({
     env: {
       NODE_ENV: process.env.NODE_ENV,
       PORT: process.env.PORT,
       SUPABASE_URL: process.env.SUPABASE_URL ? 'SET' : 'NOT SET',
       SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY ? 'SET' : 'NOT SET',
-      SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? 'SET' : 'NOT SET'
+      SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? 'SET' : 'NOT SET',
+      TEST_USER_ID: TEST_USER_ID ? 'SET' : 'NOT SET',
     },
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
-// 404 handler
+// ---------- 404 ----------
 app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    error: 'Endpoint not found',
+  return jsonError(res, 404, 'NOT_FOUND', 'Endpoint not found', {
     path: req.originalUrl,
     method: req.method,
     available_endpoints: [
@@ -276,26 +304,30 @@ app.use('*', (req, res) => {
       'POST /api/commands',
       'GET /api/jobs/:id',
       'GET /api/jobs',
-      'GET /api/commands/supported'
-    ]
+      'GET /api/commands/supported',
+      'GET /debug/role',
+      'GET /debug',
+    ],
   });
 });
 
-// Global error handler
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+// ---------- global error ----------
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({
-    success: false,
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
-  });
+  return jsonError(
+    res,
+    500,
+    'INTERNAL_ERROR',
+    process.env.NODE_ENV === 'development' ? err?.message : 'Something went wrong'
+  );
 });
 
-// Start server
+// ---------- start ----------
 app.listen(PORT, () => {
   console.log(`🚀 DevCommandHub API server running on http://localhost:${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`📚 API info: http://localhost:${PORT}/api`);
+  console.log(`🔎 Debug role:  http://localhost:${PORT}/debug/role`);
   console.log(`⚡ Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
