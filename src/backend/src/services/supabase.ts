@@ -1,8 +1,6 @@
 // src/backend/src/services/supabase.ts
 import dotenv from 'dotenv';
 dotenv.config();
-console.log('SUPABASE_URL:', process.env.SUPABASE_URL);
-console.log('SUPABASE_KEY:', process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
