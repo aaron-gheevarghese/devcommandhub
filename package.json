@@ -8,7 +8,7 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onCommand:devcommandhub.openWindow"
+    
   ],
   "categories": [
     "Other"
