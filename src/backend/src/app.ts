@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
-import { supabaseService } from './services/supabase';
+import { supabaseService, supabaseAdmin } from './services/supabase';
 import { commandParser } from './services/commandParser';
 
 dotenv.config();
@@ -54,15 +54,9 @@ function resolveUserId(
   }
 
   if (allowMissing) {
-    // caller will decide how to handle listing without user scope
-    // (we still avoid returning null to typed APIs)
     return { ok: true, userId: '' };
   }
 
-  // We will return a 400 with a helpful hint
-  // NOTE: we can't send here; callers will use this to craft a response.
-  // We'll return a marker object prompting caller to send a 400.
-  // (See usages below.)
   return {
     ok: false,
     res: {} as express.Response,
@@ -151,15 +145,10 @@ app.post('/api/commands', async (req, res) => {
       });
     }
 
-    // 🔎 Debug: check DB auth role on this code path
+    // 🔎 Debug: check DB auth role on this code path using the raw admin client
     try {
-      const svcAny = supabaseService as any;
-      if (typeof svcAny.rpc === 'function') {
-        const dbg = await svcAny.rpc('debug_auth');
-        console.log('DEBUG_AUTH RPC:', dbg?.data || null, dbg?.error || null);
-      } else {
-        console.log('DEBUG_AUTH RPC: rpc() not exposed on supabaseService (skip)');
-      }
+      const { data: dbg, error: dbgErr } = await supabaseAdmin.rpc('debug_auth');
+      console.log('DEBUG_AUTH RPC:', dbg || null, dbgErr || null);
     } catch (e) {
       console.warn('DEBUG_AUTH RPC failed:', e);
     }
@@ -242,7 +231,7 @@ app.get('/api/jobs', async (req, res) => {
     }
     const userId = uid.userId; // string
 
-    const jobs = await supabaseService.getUserJobs(userId, lim); // expects string
+    const jobs = await supabaseService.getUserJobs(userId, lim);
     const filtered = status ? jobs.filter((j: any) => j.status === status) : jobs;
 
     return res.json({
@@ -267,11 +256,7 @@ app.get('/api/jobs', async (req, res) => {
 // ---------- debug: role ----------
 app.get('/debug/role', async (_req, res) => {
   try {
-    const svcAny = supabaseService as any;
-    if (typeof svcAny.rpc !== 'function') {
-      return res.json({ success: true, debug_auth: { note: 'rpc() not exposed on supabaseService' } });
-    }
-    const { data, error } = await svcAny.rpc('debug_auth');
+    const { data, error } = await supabaseAdmin.rpc('debug_auth');
     return res.json({ success: true, debug_auth: data || null, error: error || null });
   } catch (error: any) {
     return jsonError(res, 500, 'DEBUG_ROLE_ERROR', error?.message || 'Failed to run debug_auth()');
