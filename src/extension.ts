@@ -39,35 +39,35 @@ class DevCommandHubProvider {
   private getNonce(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let s = '';
-    for (let i = 0; i < 32; i++) {
-      s += chars[Math.floor(Math.random() * chars.length)];
-    }
+    for (let i = 0; i < 32; i++) {s += chars[Math.floor(Math.random() * chars.length)];}
     return s;
   }
 
   async openWindow() {
-    if (this.panel) {
-      this.panel.reveal(vscode.ViewColumn.Beside);
-      return;
-    }
+  if (this.panel) {
+    this.panel.reveal(vscode.ViewColumn.Beside);
+    return;
+  }
 
-    this.panel = vscode.window.createWebviewPanel(
-      'devcommandhub.panel',
-      'DevCommandHub Panel',
-      vscode.ViewColumn.Beside,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-      }
-    );
+  this.panel = vscode.window.createWebviewPanel(
+    'devcommandhub.panel',
+    'DevCommandHub Panel',
+    vscode.ViewColumn.Beside,
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
 
-    // Load media.html from the extension root (not src/)
-    const htmlPath = vscode.Uri.joinPath(this.context.extensionUri, 'media.html');
-    let html = fs.readFileSync(htmlPath.fsPath, 'utf-8');
+  // Load media.html from the extension root
+  const htmlPath = vscode.Uri.joinPath(this.context.extensionUri, 'media.html');
+  let html = fs.readFileSync(htmlPath.fsPath, 'utf-8');
 
-    // Prepare nonce & CSP
-    const nonce = this.getNonce();
-    const cspMeta = `
+  // Ensure Ask/Submit are not visually disabled even if our script hasn't run yet
+  html = html
+    .replace(/(<button[^>]*id="askBtn"[^>]*)(\sdisabled)?/i, '$1')
+    .replace(/(<button[^>]*id="submitBtn"[^>]*)(\sdisabled)?/i, '$1');
+
+  // CSP + nonce
+  const nonce = this.getNonce();
+  const cspMeta = `
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'none';
            img-src ${this.panel.webview.cspSource} https: data:;
@@ -75,57 +75,45 @@ class DevCommandHubProvider {
            font-src ${this.panel.webview.cspSource} https: data:;
            script-src 'nonce-${nonce}';">`;
 
-    // Ensure CSP is present (inject before the closing </head>, case-insensitive)
-    if (!/http-equiv=["']Content-Security-Policy["']/i.test(html)) {
-      html = html.replace(/<\/head>/i, `${cspMeta}\n</head>`);
-    }
-
-    // Boot snippet so window.vscode exists inside the webview
-    const vscodeBoot = `<script nonce="${nonce}">try{window.vscode = acquireVsCodeApi();}catch(e){console.warn('acquireVsCodeApi unavailable', e);}</script>`;
-
-    // Our integration script (nonce applied)
-    const customScript = this.getDevCommandHubScript(nonce);
-
-    // *** CRITICAL FIX ***
-    // Inject at the real, final </body> only (avoid code samples containing </body>)
-    html = html.replace(/<\/body>\s*$/i, `${vscodeBoot}\n${customScript}\n</body>`);
-
-    this.panel.webview.html = html;
-
-    // Handle messages from webview
-    this.panel.webview.onDidReceiveMessage(
-      async (message) => {
-        switch (message.command) {
-          case 'sendDevCommand':
-            await this.handleDevCommand(message.text);
-            break;
-          case 'refreshJob':
-            if (message.jobId) {
-              await this.refreshJobStatus(message.jobId);
-            }
-            break;
-        }
-      },
-      undefined,
-      this.context.subscriptions
-    );
-
-    this.panel.onDidDispose(() => {
-      this.panel = undefined;
-    }, null, this.context.subscriptions);
-
-    vscode.window.showInformationMessage('DevCommandHub Panel Opened!');
+  if (!/http-equiv=["']Content-Security-Policy["']/i.test(html)) {
+    html = html.replace(/<\/head>/i, `${cspMeta}\n</head>`);
   }
 
-  private async handleDevCommand(command: string) {
-    if (!this.panel) {
-      return;
-    }
+  const vscodeBoot =
+    `<script nonce="${nonce}">console.log('[DCH] boot');try{window.vscode=acquireVsCodeApi();}catch(e){console.warn('acquireVsCodeApi unavailable',e);}</script>`;
 
+  const controller = this.getControllerScript(nonce);
+
+  // Append boot + controller at the *actual* end of body (fallback if missing)
+  const endIdx = html.toLowerCase().lastIndexOf('</body>');
+  if (endIdx >= 0) {
+    html = html.slice(0, endIdx) + `\n${vscodeBoot}\n${controller}\n` + html.slice(endIdx);
+  } else {
+    html += `\n${vscodeBoot}\n${controller}\n`;
+  }
+
+  this.panel.webview.html = html;
+
+  this.panel.webview.onDidReceiveMessage(async (message) => {
+    switch (message.command) {
+      case 'sendDevCommand':
+        await this.handleDevCommand(message.text);
+        break;
+      case 'refreshJob':
+        if (message.jobId) {await this.refreshJobStatus(message.jobId);}
+        break;
+    }
+  }, undefined, this.context.subscriptions);
+
+  this.panel.onDidDispose(() => (this.panel = undefined), null, this.context.subscriptions);
+}
+
+
+  private async handleDevCommand(command: string) {
+    if (!this.panel) {return;}
     try {
       this.panel.webview.postMessage({ command: 'showTyping' });
       const response = await this.sendCommandToAPI(command);
-
       if (response.success) {
         this.panel.webview.postMessage({
           command: 'addDevResponse',
@@ -134,8 +122,8 @@ class DevCommandHubProvider {
             job_id: response.job_id,
             parsed_intent: response.parsed_intent,
             status: response.status,
-            created_at: response.created_at,
-          },
+            created_at: response.created_at
+          }
         });
       } else {
         throw new Error('Failed to create job');
@@ -145,327 +133,234 @@ class DevCommandHubProvider {
         command: 'addDevResponse',
         response: {
           type: 'error',
-          message: error instanceof Error ? error.message : 'Unknown error occurred',
-        },
+          message: error instanceof Error ? error.message : 'Unknown error occurred'
+        }
       });
     }
   }
 
   private async sendCommandToAPI(command: string): Promise<JobResponse> {
-    const apiUrl = `${this.getApiBaseUrl()}/api/commands`;
-
-    const response = await fetch(apiUrl, {
+    const resp = await fetch(`${this.getApiBaseUrl()}/api/commands`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
+      body: JSON.stringify({ command })
     });
-
-    if (!response.ok) {
-      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-    }
-    return (await response.json()) as JobResponse;
+    if (!resp.ok) {throw new Error(`API request failed: ${resp.status} ${resp.statusText}`);}
+    return (await resp.json()) as JobResponse;
   }
 
   private async refreshJobStatus(jobId: string) {
-    if (!this.panel) {
-      return;
-    }
-
+    if (!this.panel) {return;}
     try {
-      const jobDetails = await this.getJobDetails(jobId);
+      const job = await this.getJobDetails(jobId);
       this.panel.webview.postMessage({
         command: 'updateJobStatus',
         jobId,
-        status: jobDetails.status,
-        output: jobDetails.output,
-        error_message: jobDetails.error_message,
+        status: job.status,
+        output: job.output,
+        error_message: job.error_message
       });
-    } catch (error) {
-      vscode.window.showErrorMessage(
-        `Failed to refresh job: ${error instanceof Error ? error.message : String(error)}`
-      );
+    } catch (e) {
+      vscode.window.showErrorMessage(`Failed to refresh job: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
   private async getJobDetails(jobId: string): Promise<JobDetails> {
-    const apiUrl = `${this.getApiBaseUrl()}/api/jobs/${jobId}`;
-    const response = await fetch(apiUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch job details: ${response.status} ${response.statusText}`);
-    }
-    const result = (await response.json()) as { job: JobDetails };
+    const resp = await fetch(`${this.getApiBaseUrl()}/api/jobs/${jobId}`);
+    if (!resp.ok) {throw new Error(`Failed to fetch job details: ${resp.status} ${resp.statusText}`);}
+    const result = (await resp.json()) as { job: JobDetails };
     return result.job;
   }
 
-  private getDevCommandHubScript(nonce: string): string {
-    return `
+  private getControllerScript(nonce: string): string {
+  return `
 <script nonce="${nonce}">
-// DevCommandHub Integration Script
 (function() {
-  console.log('DevCommandHub script initializing...');
-  // Ensure window.vscode exists (boot snippet already set it, this is a fallback)
-  const vscode = window.vscode || (typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null);
+  console.log('[DCH] controller: start');
+
+  var vscode = window.vscode || (typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null);
   window.vscode = vscode;
 
-  function initDevCommandHub() {
-    console.log('Initializing DevCommandHub integration');
+  function byId(id){ return document.getElementById(id); }
+  var DEVOPS = ['deploy','scale','logs','restart','rollback','status'];
+  function isDevOps(txt){ txt=(txt||'').toLowerCase(); return DEVOPS.some(k => txt.includes(k)); }
 
-    const inputField = document.getElementById('inputField');
-    const askBtn = document.getElementById('askBtn');
-    const submitBtn = document.getElementById('submitBtn');
-    const chatContainer = document.getElementById('chatContainer');
+  function addUserMessage(m){
+    var chat = byId('chatContainer'); if (!chat) return;
+    var item = document.createElement('div'); item.className='conversation-item';
+    var u = document.createElement('div'); u.className='user-message';
+    var av = document.createElement('div'); av.className='user-avatar'; av.textContent='A';
+    var msg = document.createElement('div');
+    var name = document.createElement('div'); name.className='user-name'; name.textContent='aaron-gheevarghese';
+    var txt = document.createElement('div'); txt.className='user-message-content'; txt.textContent=m;
+    msg.appendChild(name); msg.appendChild(txt); u.appendChild(av); u.appendChild(msg);
+    item.appendChild(u); chat.appendChild(item); chat.scrollTop = chat.scrollHeight;
+  }
 
-    if (!inputField || !askBtn || !submitBtn || !chatContainer) {
-      console.error('Required elements not found');
+  function addDemoBotReply(){
+    var chat = byId('chatContainer'); if (!chat) return;
+    var botDiv = document.createElement('div'); botDiv.className='bot-response';
+    var head = document.createElement('div'); head.className='copilot-header';
+    var icon = document.createElement('div'); icon.className='copilot-icon'; icon.textContent='⚡';
+    var label = document.createElement('div'); label.className='copilot-label'; label.textContent='DevCommandHub';
+    var meta = document.createElement('div'); meta.className='copilot-meta'; meta.textContent='Demo';
+    head.appendChild(icon); head.appendChild(label); head.appendChild(meta);
+    var body = document.createElement('div'); body.className='bot-message-content';
+    body.textContent = "I'm a demo assistant. I can help you with coding questions, explain concepts, and assist with development tasks!";
+    var wrap = document.createElement('div'); wrap.className='conversation-item';
+    wrap.appendChild(botDiv); botDiv.appendChild(head); botDiv.appendChild(body);
+    chat.appendChild(wrap); chat.scrollTop = chat.scrollHeight;
+  }
+
+  function clearInput(){
+    var input = byId('inputField');
+    if (input){ input.value=''; input.style.height='auto'; }
+  }
+
+  function handleSend(){
+    var input = byId('inputField'); if (!input) return;
+    var text = (input.value||'').trim(); if (!text) return;
+    addUserMessage(text);
+
+    if (isDevOps(text)) {
+      console.log('[DCH] routing to backend:', text);
+      clearInput();
+      if (window.vscode) window.vscode.postMessage({ command: 'sendDevCommand', text: text });
       return;
     }
+    clearInput();
+    addDemoBotReply();
+  }
 
-    const devOpsKeywords = ['deploy', 'scale', 'logs', 'restart', 'rollback', 'status'];
+  function init(){
+    var input  = byId('inputField');
+    var ask    = byId('askBtn');
+    var submit = byId('submitBtn');
+    if (!input || !ask || !submit) { console.error('[DCH] missing UI elements'); return; }
 
-    function enhancedSendMessage() {
-      const text = inputField.value.trim();
-      if (!text) return;
+    // Force-enable and keep them enabled
+    ask.removeAttribute('disabled'); submit.removeAttribute('disabled');
+    setInterval(function(){
+      if (ask.hasAttribute('disabled')) ask.removeAttribute('disabled');
+      if (submit.hasAttribute('disabled')) submit.removeAttribute('disabled');
+    }, 500);
 
-      const isDevOpsCommand = devOpsKeywords.some(k => text.toLowerCase().includes(k));
-      if (isDevOpsCommand) {
-        handleDevOpsCommand(text);
-      } else {
-        if (typeof sendMessage === 'function') {
-          sendMessage();
-        } else if (typeof addConversation === 'function') {
-          addConversation(text);
-          clearInput();
-        }
-      }
+    function autosize(){
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     }
+    input.addEventListener('input', autosize); autosize();
 
-    function handleDevOpsCommand(command) {
-      addUserMessage(command);
-      clearInput();
-      if (window.vscode) {
-        window.vscode.postMessage({ command: 'sendDevCommand', text: command });
-      } else {
-        console.warn('vscode API not available');
-      }
-    }
-
-    function addUserMessage(userMessage) {
-      const conversationItem = document.createElement('div');
-      conversationItem.className = 'conversation-item';
-      const userDiv = document.createElement('div');
-      userDiv.className = 'user-message';
-      const avatar = document.createElement('div');
-      avatar.className = 'user-avatar';
-      avatar.textContent = 'A';
-      const messageContent = document.createElement('div');
-      const userName = document.createElement('div');
-      userName.className = 'user-name';
-      userName.textContent = 'aaron-gheevarghese';
-      const userText = document.createElement('div');
-      userText.className = 'user-message-content';
-      userText.textContent = userMessage;
-      messageContent.appendChild(userName);
-      messageContent.appendChild(userText);
-      userDiv.appendChild(avatar);
-      userDiv.appendChild(messageContent);
-      conversationItem.appendChild(userDiv);
-      chatContainer.appendChild(conversationItem);
-      chatContainer.scrollTop = chatContainer.scrollHeight;
-    }
-
-    function clearInput() {
-      inputField.value = '';
-      inputField.style.height = 'auto';
-      askBtn.disabled = true;
-      submitBtn.disabled = true;
-    }
-
-    // Bind events
-    askBtn.onclick = enhancedSendMessage;
-    submitBtn.onclick = enhancedSendMessage;
-    inputField.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        enhancedSendMessage();
-      }
+    ask.addEventListener('click', handleSend);
+    submit.addEventListener('click', handleSend);
+    input.addEventListener('keydown', function(e){
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
     });
 
-    console.log('DevCommandHub integration complete');
+    input.focus();
+    console.log('[DCH] controller: bound');
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initDevCommandHub);
-  } else {
-    setTimeout(initDevCommandHub, 0);
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
 
-  // Webview message handlers
-  let typingIndicator = null;
-
-  window.addEventListener('message', event => {
-    const message = event.data;
-    switch (message.command) {
-      case 'showTyping':
-        showTypingIndicator();
-        break;
-      case 'addDevResponse':
-        hideTypingIndicator();
-        addDevCommandHubResponse(message.response);
-        break;
-      case 'updateJobStatus':
-        updateJobStatusInChat(message.jobId, message.status, message.output, message.error_message);
-        break;
-    }
+  // ===== extension → webview
+  var typing = null;
+  window.addEventListener('message', function(ev){
+    var m = ev.data || {};
+    if (m.command === 'showTyping') return showTyping();
+    if (m.command === 'addDevResponse') { hideTyping(); return addDevResponse(m.response); }
+    if (m.command === 'updateJobStatus') return updateJobStatusInChat(m.jobId, m.status, m.output, m.error_message);
   });
 
-  function showTypingIndicator() {
-    if (typingIndicator) return;
-    const chatContainer = document.getElementById('chatContainer');
-    if (!chatContainer) return;
-    typingIndicator = document.createElement('div');
-    typingIndicator.className = 'conversation-item';
-    typingIndicator.innerHTML = \`
-      <div class="bot-response">
-        <div class="copilot-header">
-          <div class="copilot-icon">⚡</div>
-          <div class="copilot-label">DevCommandHub</div>
-          <div class="copilot-meta">Processing...</div>
-        </div>
-        <div class="bot-message-content"><em>Processing your command...</em></div>
-      </div>\`;
-    chatContainer.appendChild(typingIndicator);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
+  function showTyping(){
+    var cc = byId('chatContainer'); if (!cc) return;
+    if (typing) return;
+    typing = document.createElement('div'); typing.className='conversation-item';
+    typing.innerHTML = '<div class="bot-response"><div class="copilot-header"><div class="copilot-icon">⚡</div><div class="copilot-label">DevCommandHub</div><div class="copilot-meta">Processing...</div></div><div class="bot-message-content"><em>Processing your command...</em></div></div>';
+    cc.appendChild(typing); cc.scrollTop = cc.scrollHeight;
   }
+  function hideTyping(){ if (typing){ typing.remove(); typing=null; } }
 
-  function hideTypingIndicator() {
-    if (typingIndicator) {
-      typingIndicator.remove();
-      typingIndicator = null;
-    }
-  }
+  function addDevResponse(resp){
+    var cc = byId('chatContainer'); if (!cc) return;
+    var bot = document.createElement('div'); bot.className = 'bot-response';
+    var head = document.createElement('div'); head.className='copilot-header';
+    var icon = document.createElement('div'); icon.className='copilot-icon'; icon.textContent='⚡';
+    var label = document.createElement('div'); label.className='copilot-label'; label.textContent='DevCommandHub';
+    var meta = document.createElement('div'); meta.className='copilot-meta';
+    var body = document.createElement('div'); body.className='bot-message-content';
 
-  function addDevCommandHubResponse(response) {
-    const chatContainer = document.getElementById('chatContainer');
-    if (!chatContainer) return;
-
-    const botDiv = document.createElement('div');
-    botDiv.className = 'bot-response';
-
-    const copilotHeader = document.createElement('div');
-    copilotHeader.className = 'copilot-header';
-
-    const copilotIcon = document.createElement('div');
-    copilotIcon.className = 'copilot-icon';
-    copilotIcon.textContent = '⚡';
-
-    const copilotLabel = document.createElement('div');
-    copilotLabel.className = 'copilot-label';
-    copilotLabel.textContent = 'DevCommandHub';
-
-    const copilotMeta = document.createElement('div');
-    copilotMeta.className = 'copilot-meta';
-
-    const botText = document.createElement('div');
-    botText.className = 'bot-message-content';
-
-    if (response.type === 'job_created') {
-      copilotMeta.textContent = 'Job Created';
-      const statusClass = response.status;
-      const confidence = (response.parsed_intent.confidence * 100).toFixed(1);
-      botText.innerHTML = \`
-        <strong>✅ Command processed successfully!</strong><br><br>
-        <strong>Job Details:</strong><br>
-        📋 Job ID: <code>\${response.job_id}</code><br>
-        🎯 Action: <strong>\${response.parsed_intent.action}</strong><br>
-        \${response.parsed_intent.service ? \`🔧 Service: <strong>\${response.parsed_intent.service}</strong><br>\` : ''}
-        \${response.parsed_intent.environment ? \`🌍 Environment: <strong>\${response.parsed_intent.environment}</strong><br>\` : ''}
-        📊 Confidence: <strong>\${confidence}%</strong><br>
-        📈 Status: <span class="status-badge \${statusClass}">\${response.status}</span><br>
-        🕒 Created: \${new Date(response.created_at).toLocaleString()}<br><br>
-        <button id="refresh-\${response.job_id}" style="background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer;">
-          🔄 Refresh Status
-        </button>\`;
-      botText.setAttribute('data-job-id', response.job_id);
-      setTimeout(() => {
-        const btn = document.getElementById('refresh-' + response.job_id);
-        if (btn) btn.addEventListener('click', () => {
-          if (window.vscode) window.vscode.postMessage({ command: 'refreshJob', jobId: response.job_id });
+    if (resp && resp.type === 'job_created') {
+      meta.textContent = 'Job Created';
+      var conf = (resp.parsed_intent.confidence * 100).toFixed(1);
+      body.innerHTML =
+        '<strong>✅ Command processed successfully!</strong><br><br>' +
+        '<strong>Job Details:</strong><br>' +
+        '📋 Job ID: <code>' + resp.job_id + '</code><br>' +
+        '🎯 Action: <strong>' + resp.parsed_intent.action + '</strong><br>' +
+        (resp.parsed_intent.service ? '🔧 Service: <strong>' + resp.parsed_intent.service + '</strong><br>' : '') +
+        (resp.parsed_intent.environment ? '🌍 Environment: <strong>' + resp.parsed_intent.environment + '</strong><br>' : '') +
+        '📊 Confidence: <strong>' + conf + '%</strong><br>' +
+        '📈 Status: <span class="status-badge ' + resp.status + '">' + resp.status + '</span><br>' +
+        '🕒 Created: ' + new Date(resp.created_at).toLocaleString() + '<br><br>' +
+        '<button id="refresh-' + resp.job_id + '" style="background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer;">🔄 Refresh Status</button>';
+      body.setAttribute('data-job-id', resp.job_id);
+      setTimeout(function(){
+        var btn = document.getElementById('refresh-' + resp.job_id);
+        if (btn) btn.addEventListener('click', function(){
+          if (window.vscode) window.vscode.postMessage({ command: 'refreshJob', jobId: resp.job_id });
         });
       }, 0);
-    } else if (response.type === 'error') {
-      copilotMeta.textContent = 'Error';
-      botText.innerHTML = \`<strong>❌ Error processing command:</strong><br>\${response.message}\`;
+    } else if (resp && resp.type === 'error') {
+      meta.textContent = 'Error';
+      body.innerHTML = '<strong>❌ Error processing command:</strong><br>' + resp.message;
     }
 
-    copilotHeader.appendChild(copilotIcon);
-    copilotHeader.appendChild(copilotLabel);
-    copilotHeader.appendChild(copilotMeta);
-    botDiv.appendChild(copilotHeader);
-    botDiv.appendChild(botText);
+    head.appendChild(icon); head.appendChild(label); head.appendChild(meta);
+    bot.appendChild(head); bot.appendChild(body);
 
-    const lastConversationItem = chatContainer.lastElementChild;
-    if (lastConversationItem && lastConversationItem.className === 'conversation-item') {
-      lastConversationItem.appendChild(botDiv);
-    } else {
-      const conversationItem = document.createElement('div');
-      conversationItem.className = 'conversation-item';
-      conversationItem.appendChild(botDiv);
-      chatContainer.appendChild(conversationItem);
-    }
-
-    chatContainer.scrollTop = chatContainer.scrollHeight;
+    var last = cc.lastElementChild;
+    if (last && last.className === 'conversation-item') last.appendChild(bot);
+    else { var wrap = document.createElement('div'); wrap.className='conversation-item'; wrap.appendChild(bot); cc.appendChild(wrap); }
+    cc.scrollTop = cc.scrollHeight;
   }
 
-  function updateJobStatusInChat(jobId, status, output, errorMessage) {
-    const jobElement = document.querySelector(\`[data-job-id="\${jobId}"]\`);
-    if (jobElement) {
-      const statusBadge = jobElement.querySelector('.status-badge');
-      if (statusBadge) {
-        statusBadge.textContent = status;
-        statusBadge.className = \`status-badge \${status}\`;
-      }
-      if (output && output.length) {
-        const outputDiv = document.createElement('div');
-        outputDiv.innerHTML = \`<br><strong>📄 Output:</strong><div class="code-block">\${output.join('\\n')}</div>\`;
-        jobElement.appendChild(outputDiv);
-      }
-      if (errorMessage) {
-        const errorDiv = document.createElement('div');
-        errorDiv.innerHTML = \`<br><strong>❌ Error:</strong><div class="code-block">\${errorMessage}</div>\`;
-        jobElement.appendChild(errorDiv);
-      }
-    }
+  function updateJobStatusInChat(jobId, status, output, errorMessage){
+    var el = document.querySelector('[data-job-id="' + jobId + '"]');
+    if (!el) return;
+    var badge = el.querySelector('.status-badge'); if (badge) { badge.textContent = status; badge.className = 'status-badge ' + status; }
+    if (output && output.length){ var o=document.createElement('div'); o.innerHTML='<br><strong>📄 Output:</strong><div class="code-block">'+output.join('\\n')+'</div>'; el.appendChild(o); }
+    if (errorMessage){ var er=document.createElement('div'); er.innerHTML='<br><strong>❌ Error:</strong><div class="code-block">'+errorMessage+'</div>'; el.appendChild(er); }
   }
 
   // Status badge styles
-  const style = document.createElement('style');
-  style.textContent = \`
-    .status-badge{display:inline-block;padding:2px 6px;border-radius:3px;font-size:.8em;font-weight:bold;text-transform:uppercase}
-    .status-badge.queued{background-color:#ffd700;color:#000}
-    .status-badge.running{background-color:#007acc;color:#fff}
-    .status-badge.completed{background-color:#28a745;color:#fff}
-    .status-badge.failed{background-color:#dc3545;color:#fff}
-    .status-badge.cancelled{background-color:#6c757d;color:#fff}\`;
+  var style = document.createElement('style');
+  style.textContent =
+    '.status-badge{display:inline-block;padding:2px 6px;border-radius:3px;font-size:.8em;font-weight:bold;text-transform:uppercase}' +
+    '.status-badge.queued{background-color:#ffd700;color:#000}' +
+    '.status-badge.running{background-color:#007acc;color:#fff}' +
+    '.status-badge.completed{background-color:#28a745;color:#fff}' +
+    '.status-badge.failed{background-color:#dc3545;color:#fff}' +
+    '.status-badge.cancelled{background-color:#6c757d;color:#fff}';
   document.head.appendChild(style);
 
+  console.log('[DCH] controller: ready');
 })();
 </script>
 `;
-  }
+}
 
-  dispose() {
-    if (this.panel) {
-      this.panel.dispose();
-    }
-  }
+
+  dispose() { if (this.panel) {this.panel.dispose();} }
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log('Congratulations, your extension "devcommandhub" is now active!');
   const provider = new DevCommandHubProvider(context);
-  const disposable = vscode.commands.registerCommand('devcommandhub.openWindow', () => provider.openWindow());
-  context.subscriptions.push(disposable);
-  context.subscriptions.push(provider);
+  context.subscriptions.push(
+    vscode.commands.registerCommand('devcommandhub.openWindow', () => provider.openWindow()),
+    provider
+  );
 }
 
 export function deactivate() {}
