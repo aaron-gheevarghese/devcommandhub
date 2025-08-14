@@ -7,9 +7,7 @@
     "vscode": "^1.102.0"
   },
   "main": "./out/extension.js",
-  "activationEvents": [
-    
-  ],
+  "activationEvents": [],
   "categories": [
     "Other"
   ],
@@ -19,7 +17,17 @@
         "command": "devcommandhub.openWindow",
         "title": "DevCommandHub: Open Window"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "DevCommandHub",
+      "properties": {
+        "devcommandhub.apiBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:3001",
+          "description": "Base URL for DevCommandHub API"
+        }
+      }
+    }
   },
   "scripts": {
     "clean": "rimraf out",
