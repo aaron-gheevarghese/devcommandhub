@@ -9,7 +9,11 @@
     "types": ["node", "vscode", "mocha"],
     "strict": true,
     "sourceMap": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitAny": false
   },
   "include": ["src/**/*.ts", "src/backend/scripts/createTestUser.cjs"],
   "exclude": ["node_modules", "out", ".vscode-test"]
