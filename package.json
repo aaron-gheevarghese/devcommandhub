@@ -16,6 +16,10 @@
       {
         "command": "devcommandhub.openWindow",
         "title": "DevCommandHub: Open Window"
+      },
+      {
+        "command": "devcommandhub.setApiBase",
+        "title": "DevCommandHub: Set API Base URL"
       }
     ],
     "configuration": {
@@ -27,7 +31,19 @@
           "description": "Base URL for DevCommandHub API"
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "devcommandhub.openWindow",
+        "key": "ctrl+shift+d",
+        "mac": "cmd+shift+d"
+      },
+      {
+        "command": "devcommandhub.setApiBase",
+        "key": "ctrl+shift+alt+a",
+        "mac": "cmd+shift+alt+a"
+      }
+    ]
   },
   "scripts": {
     "clean": "rimraf out",
@@ -57,10 +73,12 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.54.0",
+    "@types/node-fetch": "^2.6.11",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
+    "node-fetch": "^2.7.0",
     "zod": "^4.0.17"
   }
 }
