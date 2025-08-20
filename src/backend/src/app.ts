@@ -13,6 +13,9 @@ const PORT = process.env.PORT || 3001;
 const VERSION = process.env.npm_package_version || '1.0.0';
 const TEST_USER_ID = process.env.TEST_USER_ID; // string | undefined
 
+// 🔧 NEW: In-memory job tracking for lifecycle management
+const jobSimulations = new Map<string, NodeJS.Timeout>();
+
 // ---------- middleware ----------
 app.use(helmet());
 app.use(
@@ -64,6 +67,227 @@ function resolveUserId(
   };
 }
 
+// 🔧 NEW: Job lifecycle simulation functions
+async function simulateJobExecution(jobId: string, action: string, service?: string, environment?: string) {
+  console.log(`[JOB ${jobId}] Starting simulation for ${action}`);
+  
+  try {
+    // Phase 1: Transition to 'running' after 2-3 seconds
+    const runningDelay = 2000 + Math.random() * 1000;
+    const runningTimeout = setTimeout(async () => {
+      try {
+        console.log(`[JOB ${jobId}] Transitioning to running`);
+        await supabaseService.updateJobStatus(jobId, 'running', {
+          started_at: new Date().toISOString(),
+          output: ['Starting job execution...', `Action: ${action}`, service ? `Service: ${service}` : '', environment ? `Environment: ${environment}` : ''].filter(Boolean)
+        });
+      } catch (error) {
+        console.error(`[JOB ${jobId}] Error updating to running:`, error);
+      }
+    }, runningDelay);
+
+    // Phase 2: Complete after 6-10 seconds total
+    const completionDelay = 6000 + Math.random() * 4000;
+    const completionTimeout = setTimeout(async () => {
+      try {
+        // 90% success rate, 10% failure for realistic simulation
+        const isSuccess = Math.random() > 0.1;
+        
+        if (isSuccess) {
+          console.log(`[JOB ${jobId}] Completing successfully`);
+          const successOutput = generateSuccessOutput(action, service, environment);
+          await supabaseService.updateJobStatus(jobId, 'completed', {
+            completed_at: new Date().toISOString(),
+            output: successOutput
+          });
+        } else {
+          console.log(`[JOB ${jobId}] Simulating failure`);
+          const errorOutput = generateErrorOutput(action, service, environment);
+          await supabaseService.updateJobStatus(jobId, 'failed', {
+            completed_at: new Date().toISOString(),
+            error_message: 'Simulated job failure',
+            output: errorOutput
+          });
+        }
+        
+        // Clean up tracking
+        jobSimulations.delete(jobId);
+      } catch (error) {
+        console.error(`[JOB ${jobId}] Error completing job:`, error);
+        // Try to mark as failed on error
+        try {
+          await supabaseService.updateJobStatus(jobId, 'failed', {
+            completed_at: new Date().toISOString(),
+            error_message: `Job completion error: ${error instanceof Error ? error.message : 'Unknown error'}`
+          });
+        } catch (updateError) {
+          console.error(`[JOB ${jobId}] Failed to mark job as failed:`, updateError);
+        }
+        jobSimulations.delete(jobId);
+      }
+    }, completionDelay);
+
+    // Store timeouts for cleanup if needed
+    jobSimulations.set(jobId, completionTimeout);
+    
+  } catch (error) {
+    console.error(`[JOB ${jobId}] Error in job simulation:`, error);
+    jobSimulations.delete(jobId);
+  }
+}
+
+function generateSuccessOutput(action: string, service?: string, environment?: string): string[] {
+  const baseOutput = [
+    'Starting job execution...',
+    `Action: ${action}`,
+    ...(service ? [`Service: ${service}`] : []),
+    ...(environment ? [`Environment: ${environment}`] : []),
+    '',
+    'Executing command...',
+  ];
+
+  switch (action.toLowerCase()) {
+    case 'deploy':
+      return [
+        ...baseOutput,
+        'Building application...',
+        '✓ Build completed successfully',
+        'Uploading artifacts...',
+        '✓ Upload completed',
+        'Starting deployment...',
+        '✓ Deployment completed successfully',
+        '',
+        `✅ ${service || 'Application'} deployed to ${environment || 'target environment'} successfully!`,
+        `🔗 Service is now available and healthy`
+      ];
+
+    case 'scale':
+      const replicas = Math.floor(Math.random() * 5) + 2; // 2-6 replicas
+      return [
+        ...baseOutput,
+        `Scaling ${service || 'service'} to ${replicas} replicas...`,
+        'Updating deployment configuration...',
+        '✓ Configuration updated',
+        'Starting new instances...',
+        '✓ All instances started successfully',
+        'Performing health checks...',
+        '✓ All instances healthy',
+        '',
+        `✅ ${service || 'Service'} scaled to ${replicas} replicas successfully!`
+      ];
+
+    case 'logs':
+      return [
+        ...baseOutput,
+        `Fetching logs for ${service || 'service'}...`,
+        '✓ Connected to log stream',
+        '',
+        '--- Recent Log Entries ---',
+        '[2024-01-15 10:30:15] INFO: Application started successfully',
+        '[2024-01-15 10:30:20] INFO: Database connection established',
+        '[2024-01-15 10:31:45] INFO: Processing user request',
+        '[2024-01-15 10:32:10] INFO: Request completed successfully',
+        '[2024-01-15 10:33:00] INFO: Health check passed',
+        '',
+        `✅ Retrieved latest logs for ${service || 'service'}`
+      ];
+
+    case 'restart':
+      return [
+        ...baseOutput,
+        `Restarting ${service || 'service'}...`,
+        'Gracefully stopping current instances...',
+        '✓ All instances stopped',
+        'Starting new instances...',
+        '✓ New instances started',
+        'Performing health checks...',
+        '✓ All instances healthy',
+        '',
+        `✅ ${service || 'Service'} restarted successfully!`
+      ];
+
+    case 'rollback':
+      const version = `v${Math.floor(Math.random() * 100) + 1}.${Math.floor(Math.random() * 10)}.${Math.floor(Math.random() * 10)}`;
+      return [
+        ...baseOutput,
+        `Rolling back ${service || 'service'} to previous version...`,
+        `Target version: ${version}`,
+        'Stopping current deployment...',
+        '✓ Current deployment stopped',
+        'Deploying previous version...',
+        '✓ Previous version deployed',
+        'Performing health checks...',
+        '✓ All instances healthy',
+        '',
+        `✅ ${service || 'Service'} rolled back to ${version} successfully!`
+      ];
+
+    case 'status':
+      const uptime = `${Math.floor(Math.random() * 72) + 1}h ${Math.floor(Math.random() * 60)}m`;
+      return [
+        ...baseOutput,
+        `Checking status of ${service || 'service'}...`,
+        '',
+        '--- Service Status ---',
+        `Status: ✅ Healthy`,
+        `Uptime: ${uptime}`,
+        `Replicas: ${Math.floor(Math.random() * 5) + 1}/3 running`,
+        `CPU Usage: ${Math.floor(Math.random() * 40) + 10}%`,
+        `Memory Usage: ${Math.floor(Math.random() * 60) + 20}%`,
+        `Last Deployment: ${new Date(Date.now() - Math.random() * 86400000 * 7).toLocaleString()}`,
+        '',
+        `✅ ${service || 'Service'} is healthy and running normally`
+      ];
+
+    default:
+      return [
+        ...baseOutput,
+        `Executing ${action} command...`,
+        '✓ Command executed successfully',
+        '',
+        `✅ ${action} operation completed successfully!`
+      ];
+  }
+}
+
+function generateErrorOutput(action: string, service?: string, environment?: string): string[] {
+  const baseOutput = [
+    'Starting job execution...',
+    `Action: ${action}`,
+    ...(service ? [`Service: ${service}`] : []),
+    ...(environment ? [`Environment: ${environment}`] : []),
+    '',
+    'Executing command...',
+  ];
+
+  const errors = [
+    'Connection timeout to target environment',
+    'Insufficient permissions for operation',
+    'Resource quota exceeded',
+    'Service configuration validation failed',
+    'Network connectivity issues',
+    'Authentication token expired',
+    'Target service not found',
+    'Dependency service unavailable'
+  ];
+
+  const randomError = errors[Math.floor(Math.random() * errors.length)];
+
+  return [
+    ...baseOutput,
+    'Attempting operation...',
+    `❌ Error: ${randomError}`,
+    '',
+    'Troubleshooting steps:',
+    '1. Check service configuration',
+    '2. Verify network connectivity',
+    '3. Confirm permissions and credentials',
+    '4. Review service logs for details',
+    '',
+    `❌ ${action} operation failed. Please try again or contact support.`
+  ];
+}
+
 // ---------- health ----------
 app.get('/health', async (_req, res) => {
   try {
@@ -73,6 +297,7 @@ app.get('/health', async (_req, res) => {
       timestamp: new Date().toISOString(),
       database: dbStatus ? 'connected' : 'disconnected',
       version: VERSION,
+      activeJobs: jobSimulations.size // 🔧 NEW: Show active job count
     });
   } catch (error: any) {
     jsonError(res, 500, 'HEALTH_ERROR', error?.message || 'Unknown error');
@@ -164,6 +389,15 @@ app.post('/api/commands', async (req, res) => {
     if (!job) {
       return jsonError(res, 500, 'INSERT_FAILED', 'Failed to create job');
     }
+
+    // 🔧 NEW: Start job lifecycle simulation
+    console.log(`[JOB ${job.id}] Created, starting simulation`);
+    simulateJobExecution(
+      job.id, 
+      parseResult.intent.action,
+      parseResult.intent.service,
+      parseResult.intent.environment
+    );
 
     return res.status(201).json({
       success: true,
@@ -275,6 +509,7 @@ app.get('/debug', (_req, res) => {
       TEST_USER_ID: TEST_USER_ID ? 'SET' : 'NOT SET',
     },
     timestamp: new Date().toISOString(),
+    activeJobs: jobSimulations.size, // 🔧 NEW: Show active job simulations
   });
 });
 
@@ -307,6 +542,27 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   );
 });
 
+// 🔧 NEW: Graceful shutdown - clean up active job simulations
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, cleaning up job simulations...');
+  jobSimulations.forEach((timeout, jobId) => {
+    clearTimeout(timeout);
+    console.log(`Cancelled simulation for job ${jobId}`);
+  });
+  jobSimulations.clear();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, cleaning up job simulations...');
+  jobSimulations.forEach((timeout, jobId) => {
+    clearTimeout(timeout);
+    console.log(`Cancelled simulation for job ${jobId}`);
+  });
+  jobSimulations.clear();
+  process.exit(0);
+});
+
 // ---------- start ----------
 app.listen(PORT, () => {
   console.log(`🚀 DevCommandHub API server running on http://localhost:${PORT}`);
@@ -314,6 +570,7 @@ app.listen(PORT, () => {
   console.log(`📚 API info: http://localhost:${PORT}/api`);
   console.log(`🔎 Debug role:  http://localhost:${PORT}/debug/role`);
   console.log(`⚡ Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔧 Job lifecycle simulation: ENABLED`);
 });
 
 export default app;
