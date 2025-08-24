@@ -1,4 +1,4 @@
-// src/extension.ts — Day 7 + client_hints + replicas UI
+// src/extension.ts — Day 8: NLU flags + client_hints + replicas UI
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 
@@ -18,6 +18,7 @@ interface JobResponse {
     environment?: string;
     confidence: number;
     replicas?: number; // can be returned by server
+    source?: string;   // NEW: server includes parsing source (hf:..., regex, etc)
   };
   status: string;
   created_at: string;
@@ -56,7 +57,7 @@ function parseClientHints(command: string): Record<string, any> {
   const m2 = txt.match(/\bscale\b[^\d]*(\d+)\b/);
   const n = m1?.[1] || m2?.[1];
   const hints: any = {};
-  if (n) {hints.replicas = Number(n);}
+  if (n) { hints.replicas = Number(n); }
   return hints;
 }
 
@@ -72,6 +73,18 @@ class DevCommandHubProvider implements vscode.Disposable {
 
   constructor(private context: vscode.ExtensionContext) {
     this.initializeUser();
+
+    // NEW: react to settings changes without reload (useful while testing)
+    this.context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('devcommandhub')) {
+          if (this.panel) {
+            // Light ping so the webview could update banners later if needed
+            this.panel.webview.postMessage({ command: 'settingsChanged' });
+          }
+        }
+      })
+    );
   }
 
   dispose() {
@@ -130,6 +143,15 @@ class DevCommandHubProvider implements vscode.Disposable {
   // ---- Helpers ----
   private getApiBaseUrl(): string {
     return vscode.workspace.getConfiguration('devcommandhub').get('apiBaseUrl', 'http://localhost:3001');
+  }
+
+  // NEW: read current NLU settings
+  private getNluSettings(): { enableNLU: boolean; confidenceThreshold: number; userId?: string } {
+    const cfg = vscode.workspace.getConfiguration('devcommandhub');
+    const enableNLU = cfg.get<boolean>('enableNLU', true);
+    const confidenceThreshold = cfg.get<number>('confidenceThreshold', 0.7);
+    const userId = cfg.get<string>('userId', '')?.trim() || undefined;
+    return { enableNLU, confidenceThreshold, userId };
   }
 
   private getNonce(): string {
@@ -353,7 +375,7 @@ class DevCommandHubProvider implements vscode.Disposable {
 
           if (this.currentJobId === jobId) {
             this.currentJobId = null;
-            this.isProcessingCommand = false;
+                       this.isProcessingCommand = false;
             if (this.panel) { this.panel.webview.postMessage({ command: 'setLoadingState', loading: false }); }
           }
           return;
@@ -420,10 +442,8 @@ class DevCommandHubProvider implements vscode.Disposable {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-    const configuredUserId = vscode
-      .workspace.getConfiguration('devcommandhub')
-      .get<string>('userId', '')
-      .trim();
+    // NEW: read settings once per request
+    const { enableNLU, confidenceThreshold, userId } = this.getNluSettings();
 
     const clientHints = parseClientHints(command);
 
@@ -432,7 +452,9 @@ class DevCommandHubProvider implements vscode.Disposable {
       text: command,
       source: 'vscode',
       client: 'DevCommandHub',
-      ...(configuredUserId ? { user_id: configuredUserId } : {}),
+      enableNLU,                 // NEW
+      confidenceThreshold,       // NEW
+      ...(userId ? { user_id: userId } : {}),
       ...(Object.keys(clientHints).length ? { client_hints: clientHints } : {}),
     };
 
@@ -477,7 +499,6 @@ class DevCommandHubProvider implements vscode.Disposable {
     return `
 <script nonce="${nonce}">
 (function () {
-  // Help: open DevTools inside the Webview: "..." -> "Open Webview Developer Tools"
   window.onerror = function (msg, src, line, col, err) {
     console.error('[DCH] Webview error:', msg, src + ':' + line + ':' + col, err);
   };
@@ -491,7 +512,6 @@ class DevCommandHubProvider implements vscode.Disposable {
   var currentUser = { username: 'developer', displayName: 'Developer' };
   var currentAvatarText = 'D';
   var isLoading = false;
-  var DEVOPS = ['deploy','scale','logs','restart','rollback','status'];
 
   function byId(id){ return document.getElementById(id); }
   function isDevOps(txt){ txt=(txt||'').toLowerCase(); return DEVOPS.some(function(k){ return txt.indexOf(k) !== -1; }); }
@@ -638,42 +658,37 @@ class DevCommandHubProvider implements vscode.Disposable {
   function setLoadingState(loading) { isLoading = loading; setButtonsEnabled(!loading); }
 
   function handleSend(){
-    try {
-      console.log('[DCH] handleSend called');
-      var input = byId('inputField'); if (!input) return;
-      var text = (input.value || '').trim();
+  try {
+    console.log('[DCH] handleSend called');
+    var input = byId('inputField'); if (!input) return;
+    var text = (input.value || '').trim();
 
-      if (!text) {
-        var toast = document.createElement('div');
-        toast.className = 'toast warning';
-        toast.textContent = 'Type something first 🙂';
-        document.body.appendChild(toast);
-        setTimeout(function(){
-          toast.style.animation='slideOut .3s ease-in forwards';
-          setTimeout(function(){ toast.remove(); }, 300);
-        }, 1200);
-        return;
-      }
-
-      if (isLoading) return;
-
-      addUserMessage(text);
-
-      if (isDevOps(text)) {
-        isLoading = true; setButtonsEnabled(false);
-        clearInput();
-        if (window.vscode) window.vscode.postMessage({ command: 'sendDevCommand', text: text });
-        return;
-      }
-
-      clearInput();
-      addDemoBotReply();
-      isLoading = false;
-      setButtonsEnabled(true);
-    } catch (e) {
-      console.error('[DCH] handleSend error:', e);
+    if (!text) {
+      var toast = document.createElement('div');
+      toast.className = 'toast warning';
+      toast.textContent = 'Type something first 🙂';
+      document.body.appendChild(toast);
+      setTimeout(function(){
+        toast.style.animation='slideOut .3s ease-in forwards';
+        setTimeout(function(){ toast.remove(); }, 300);
+      }, 1200);
+      return;
     }
+
+    if (isLoading) return;
+
+    addUserMessage(text);
+
+    // ⬇️ Always send to backend — server will do regex + HF NLU
+    isLoading = true; 
+    setButtonsEnabled(false);
+    clearInput();
+    if (window.vscode) window.vscode.postMessage({ command: 'sendDevCommand', text: text });
+  } catch (e) {
+    console.error('[DCH] handleSend error:', e);
   }
+}
+
 
   // ---------- Bootstrap ----------
   function init(){
@@ -721,6 +736,7 @@ class DevCommandHubProvider implements vscode.Disposable {
       if (m.command === 'showPollingError') return showPollingError(m.jobId, m.message);
       if (m.command === 'showBusyMessage') return showBusyMessage(m.message);
       if (m.command === 'updateUserInfo') return updateUserInfo(m.user, m.avatarText);
+      if (m.command === 'settingsChanged') { /* future banner toggle hook */ }
     } catch (e) {
       console.error('[DCH] message handler error:', e);
     }
@@ -768,13 +784,17 @@ class DevCommandHubProvider implements vscode.Disposable {
       var conf = (resp.parsed_intent && typeof resp.parsed_intent.confidence === 'number')
         ? (resp.parsed_intent.confidence * 100).toFixed(1) + '%'
         : '—';
+      var source = (resp.parsed_intent && resp.parsed_intent.source) || '';
+      var usingAI = (typeof source === 'string') && source.indexOf('hf:') === 0; // NEW
+      var sourceBadge = usingAI ? '✅ AI parsing' : '⚠️ regex-only';
+
       body.innerHTML =
         '<strong>Command:</strong> ' + (resp.original_command || 'Unknown') + '<br>' +
         '<strong>Action:</strong> ' + (resp.parsed_intent && resp.parsed_intent.action || 'Unknown') + '<br>' +
         (resp.parsed_intent && resp.parsed_intent.service ? '<strong>Service:</strong> ' + resp.parsed_intent.service + '<br>' : '') +
         (resp.parsed_intent && resp.parsed_intent.environment ? '<strong>Environment:</strong> ' + resp.parsed_intent.environment + '<br>' : '') +
         '<strong>Confidence:</strong> ' + conf + '<br>' +
-        // Show parsed replicas if available
+        '<strong>Parser:</strong> ' + sourceBadge + (source ? ' <span style="opacity:.6">(' + source + ')</span>' : '') + '<br>' + // NEW
         (resp.parsed_intent && typeof resp.parsed_intent.replicas !== 'undefined'
           ? '<strong>Replicas:</strong> ' + resp.parsed_intent.replicas + '<br>'
           : '') +

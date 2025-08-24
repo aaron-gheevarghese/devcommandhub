@@ -1,5 +1,5 @@
 // backend/src/services/nluService.ts
-const HF_MODEL = "cross-encoder/nli-deberta-v3-base";
+const HF_MODEL = process.env.HF_MODEL || "cross-encoder/nli-deberta-v3-base";
 
 export type ParsedIntent = {
   action: "deploy" | "rollback" | "scale" | "restart" | "logs" | "status" | "unknown";
@@ -7,7 +7,7 @@ export type ParsedIntent = {
   service: string | null;
   replicas?: number;
   confidence: number;
-  source: string;           // "hf:...", "regex", "regex-error-fallback"
+  source: string;           // "hf:...", "regex", "regex-fallback", "regex-error-fallback"
   debug?: unknown;
   error?: string;
 };
@@ -15,50 +15,69 @@ export type ParsedIntent = {
 export function regexParse(command: string): ParsedIntent {
   const c = command.toLowerCase();
 
-  const envMatch = /(prod|production|staging|stage|dev|development|local)\b/.exec(c);
-  const serviceMatch = /\b(api|backend|server|web(app)?|frontend|db|database|worker)\b/.exec(c);
-  const replicasMatch = /(\d+)\s*(replica|replicas|pods?)/.exec(c);
+  // env
+  const envMatch = /\b(prod|production|staging|stage|dev|development|local)\b/.exec(c);
 
+  // service: try "<name> service" then common names
+  const svcFromPhrase = /([\w-]+)\s+(?:service|svc)\b/.exec(c)?.[1];
+  const svcList = /\b(api|backend|server|web(?:app)?|frontend|db|database|worker|auth|user)\b/.exec(c)?.[1];
+  const service = (svcFromPhrase || svcList) ?? null;
+
+  // replicas: “to 3 replicas”, “=3 pods”, “spin up 3 …”, “scale 3”
+  let replicas: number | undefined;
+  const r1 = /\b(?:to|=)\s*(\d+)\s*(?:replicas?|pods?)\b/.exec(c);
+  const r2 = /\bscale\b[^\d]*(\d+)\b/.exec(c);
+  const r3 = /\b(?:spin\s*up|bring\s*up|scale\s*up?)\s*(\d+)\b/.exec(c);
+  if (r1?.[1]) {replicas = Number(r1[1]);}
+  else if (r2?.[1]) {replicas = Number(r2[1]);}
+  else if (r3?.[1]) {replicas = Number(r3[1]);}
+
+  // action
   const action: ParsedIntent["action"] =
     /rollback/.test(c) ? "rollback" :
-    /scale|replica|autoscal/.test(c) ? "scale" :
+    /\b(?:spin\s*up|bring\s*up|scale|replica|autoscal)/.test(c) ? "scale" :
     /restart|reboot/.test(c) ? "restart" :
-    /log/.test(c) ? "logs" :
-    /status|health|ping/.test(c) ? "status" :
-    /deploy|release|ship/.test(c) ? "deploy" : "unknown";
+    /\blogs?/.test(c) ? "logs" :
+    /\b(status|health|ping)\b/.test(c) ? "status" :
+    /\b(deploy|release|ship)\b/.test(c) ? "deploy" :
+    "unknown";
 
   return {
     action,
     environment: envMatch?.[1] ?? null,
-    service: serviceMatch?.[0] ?? null,
-    replicas: replicasMatch ? Number(replicasMatch[1]) : undefined,
+    service,
+    replicas,
     confidence: 0.5,
     source: "regex",
   };
 }
 
-async function nliEntailmentScore(premise: string, hypothesis: string, apiKey: string): Promise<number> {
+async function nliEntailmentScore(premise: string, hypothesis: string, apiKey: string | null): Promise<number> {
+  const url = `https://api-inference.huggingface.co/models/${HF_MODEL}?wait_for_model=true`;
   const input = `${premise} </s></s> ${hypothesis}`;
-  const res = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}?wait_for_model=true`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ inputs: input }),
-  });
 
-  if (!res.ok) {throw new Error(`HF ${res.status}: ${await res.text()}`);}
+  // helper to call once with optional auth
+  const call = async (useKey: string | null) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (useKey) {headers["Authorization"] = `Bearer ${useKey}`;}
+    const res = await fetch(url, { method: "POST", headers, body: JSON.stringify({ inputs: input }) });
+    return res;
+  };
+
+  let res = await call(apiKey);
+  // If the key is bad (401) or not allowed for providers (403), try anonymously once
+  if ((res.status === 401 || res.status === 403) && apiKey) {
+    res = await call(null);
+  }
+
+  if (!res.ok) {
+    throw new Error(`HF ${res.status}: ${await res.text()}`);
+  }
   const data: any = await res.json();
-
-  // HF may return [{label,score}, ...] or [[{label,score},...]]
   const labels: Array<{ label: string; score: number }> =
     Array.isArray(data) && Array.isArray(data[0]) ? data[0] :
-    Array.isArray(data) ? data :
-    [];
-
-  const ent = labels.find((x) => /entail/i.test(x.label))?.score ?? 0;
-  return ent;
+    Array.isArray(data) ? data : [];
+  return labels.find((x) => /entail/i.test(x.label))?.score ?? 0;
 }
 
 const ACTION_HYPOTHESES = [
@@ -76,13 +95,9 @@ export async function parseCommand(opts: {
   confidenceThreshold?: number; // default 0.7
 }): Promise<ParsedIntent> {
   const { command, hfApiKey, confidenceThreshold = 0.7 } = opts;
-
-  // Always grab coarse entities via regex
   const coarse = regexParse(command);
 
-  // No key → regex only
-  if (!hfApiKey) {return { ...coarse, source: "regex" };}
-
+  // No key is fine — we’ll try anonymous first in the scorer
   try {
     const scored = await Promise.all(
       ACTION_HYPOTHESES.map(async (h) => ({
@@ -95,7 +110,7 @@ export async function parseCommand(opts: {
     const accept = (top?.score ?? 0) >= confidenceThreshold;
 
     return {
-      action: accept ? top.action : "unknown",
+      action: accept ? top.action : coarse.action, // fall back to regex action if low confidence
       environment: coarse.environment,
       service: coarse.service,
       replicas: coarse.replicas,
@@ -104,6 +119,7 @@ export async function parseCommand(opts: {
       debug: { rankedActions: scored.slice(0, 3) },
     };
   } catch (err: any) {
+    // Hard failure → keep regex result but explain
     return { ...coarse, source: "regex-error-fallback", error: String(err) };
   }
 }

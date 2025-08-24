@@ -5,18 +5,16 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { supabaseService, supabaseAdmin } from './services/supabase';
 import { commandParser } from './services/commandParser';
-// NEW
 import { parseCommand as parseWithNLU, regexParse as regexOnly } from './services/nluService';
-
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const VERSION = process.env.npm_package_version || '1.0.0';
-const TEST_USER_ID = process.env.TEST_USER_ID; // string | undefined
+const TEST_USER_ID = process.env.TEST_USER_ID;
 
-// 🔧 NEW: In-memory job tracking for lifecycle management
+// In-memory job tracking for lifecycle management
 const jobSimulations = new Map<string, NodeJS.Timeout>();
 
 // ---------- middleware ----------
@@ -49,59 +47,49 @@ function resolveUserId(
   reqBodyUserId?: unknown,
   allowMissing = false
 ): { ok: true; userId: string } | { ok: false; res: express.Response; status: number } {
-  // prefer body user_id if it's a non-empty string; else fall back to TEST_USER_ID
   const candidate =
     (typeof reqBodyUserId === 'string' && reqBodyUserId.trim().length > 0
       ? reqBodyUserId.trim()
       : undefined) ?? TEST_USER_ID;
 
-  if (candidate && candidate.length > 0) {
-    return { ok: true, userId: candidate };
-  }
+  if (candidate && candidate.length > 0) {return { ok: true, userId: candidate };}
+  if (allowMissing) {return { ok: true, userId: '' };}
 
-  if (allowMissing) {
-    return { ok: true, userId: '' };
-  }
-
-  return {
-    ok: false,
-    res: {} as express.Response,
-    status: 400,
-  };
+  return { ok: false, res: {} as express.Response, status: 400 };
 }
 
-// 🔧 NEW: Job lifecycle simulation functions
+// ---------- job simulation ----------
 async function simulateJobExecution(jobId: string, action: string, service?: string, environment?: string) {
   console.log(`[JOB ${jobId}] Starting simulation for ${action}`);
-  
   try {
-    // Phase 1: Transition to 'running' after 2-3 seconds
     const runningDelay = 2000 + Math.random() * 1000;
     const runningTimeout = setTimeout(async () => {
       try {
         console.log(`[JOB ${jobId}] Transitioning to running`);
         await supabaseService.updateJobStatus(jobId, 'running', {
           started_at: new Date().toISOString(),
-          output: ['Starting job execution...', `Action: ${action}`, service ? `Service: ${service}` : '', environment ? `Environment: ${environment}` : ''].filter(Boolean)
+          output: [
+            'Starting job execution...',
+            `Action: ${action}`,
+            service ? `Service: ${service}` : '',
+            environment ? `Environment: ${environment}` : '',
+          ].filter(Boolean),
         });
       } catch (error) {
         console.error(`[JOB ${jobId}] Error updating to running:`, error);
       }
     }, runningDelay);
 
-    // Phase 2: Complete after 6-10 seconds total
     const completionDelay = 6000 + Math.random() * 4000;
     const completionTimeout = setTimeout(async () => {
       try {
-        // 90% success rate, 10% failure for realistic simulation
         const isSuccess = Math.random() > 0.1;
-        
         if (isSuccess) {
           console.log(`[JOB ${jobId}] Completing successfully`);
           const successOutput = generateSuccessOutput(action, service, environment);
           await supabaseService.updateJobStatus(jobId, 'completed', {
             completed_at: new Date().toISOString(),
-            output: successOutput
+            output: successOutput,
           });
         } else {
           console.log(`[JOB ${jobId}] Simulating failure`);
@@ -109,19 +97,16 @@ async function simulateJobExecution(jobId: string, action: string, service?: str
           await supabaseService.updateJobStatus(jobId, 'failed', {
             completed_at: new Date().toISOString(),
             error_message: 'Simulated job failure',
-            output: errorOutput
+            output: errorOutput,
           });
         }
-        
-        // Clean up tracking
         jobSimulations.delete(jobId);
       } catch (error) {
         console.error(`[JOB ${jobId}] Error completing job:`, error);
-        // Try to mark as failed on error
         try {
           await supabaseService.updateJobStatus(jobId, 'failed', {
             completed_at: new Date().toISOString(),
-            error_message: `Job completion error: ${error instanceof Error ? error.message : 'Unknown error'}`
+            error_message: `Job completion error: ${error instanceof Error ? error.message : 'Unknown error'}`,
           });
         } catch (updateError) {
           console.error(`[JOB ${jobId}] Failed to mark job as failed:`, updateError);
@@ -130,9 +115,7 @@ async function simulateJobExecution(jobId: string, action: string, service?: str
       }
     }, completionDelay);
 
-    // Store timeouts for cleanup if needed
     jobSimulations.set(jobId, completionTimeout);
-    
   } catch (error) {
     console.error(`[JOB ${jobId}] Error in job simulation:`, error);
     jobSimulations.delete(jobId);
@@ -161,11 +144,10 @@ function generateSuccessOutput(action: string, service?: string, environment?: s
         '✓ Deployment completed successfully',
         '',
         `✅ ${service || 'Application'} deployed to ${environment || 'target environment'} successfully!`,
-        `🔗 Service is now available and healthy`
+        `🔗 Service is now available and healthy`,
       ];
-
-    case 'scale':
-      const replicas = Math.floor(Math.random() * 5) + 2; // 2-6 replicas
+    case 'scale': {
+      const replicas = Math.floor(Math.random() * 5) + 2;
       return [
         ...baseOutput,
         `Scaling ${service || 'service'} to ${replicas} replicas...`,
@@ -176,9 +158,9 @@ function generateSuccessOutput(action: string, service?: string, environment?: s
         'Performing health checks...',
         '✓ All instances healthy',
         '',
-        `✅ ${service || 'Service'} scaled to ${replicas} replicas successfully!`
+        `✅ ${service || 'Service'} scaled to ${replicas} replicas successfully!`,
       ];
-
+    }
     case 'logs':
       return [
         ...baseOutput,
@@ -192,9 +174,8 @@ function generateSuccessOutput(action: string, service?: string, environment?: s
         '[2024-01-15 10:32:10] INFO: Request completed successfully',
         '[2024-01-15 10:33:00] INFO: Health check passed',
         '',
-        `✅ Retrieved latest logs for ${service || 'service'}`
+        `✅ Retrieved latest logs for ${service || 'service'}`,
       ];
-
     case 'restart':
       return [
         ...baseOutput,
@@ -206,11 +187,12 @@ function generateSuccessOutput(action: string, service?: string, environment?: s
         'Performing health checks...',
         '✓ All instances healthy',
         '',
-        `✅ ${service || 'Service'} restarted successfully!`
+        `✅ ${service || 'Service'} restarted successfully!`,
       ];
-
-    case 'rollback':
-      const version = `v${Math.floor(Math.random() * 100) + 1}.${Math.floor(Math.random() * 10)}.${Math.floor(Math.random() * 10)}`;
+    case 'rollback': {
+      const version = `v${Math.floor(Math.random() * 100) + 1}.${Math.floor(Math.random() * 10)}.${Math.floor(
+        Math.random() * 10
+      )}`;
       return [
         ...baseOutput,
         `Rolling back ${service || 'service'} to previous version...`,
@@ -222,10 +204,10 @@ function generateSuccessOutput(action: string, service?: string, environment?: s
         'Performing health checks...',
         '✓ All instances healthy',
         '',
-        `✅ ${service || 'Service'} rolled back to ${version} successfully!`
+        `✅ ${service || 'Service'} rolled back to ${version} successfully!`,
       ];
-
-    case 'status':
+    }
+    case 'status': {
       const uptime = `${Math.floor(Math.random() * 72) + 1}h ${Math.floor(Math.random() * 60)}m`;
       return [
         ...baseOutput,
@@ -239,17 +221,11 @@ function generateSuccessOutput(action: string, service?: string, environment?: s
         `Memory Usage: ${Math.floor(Math.random() * 60) + 20}%`,
         `Last Deployment: ${new Date(Date.now() - Math.random() * 86400000 * 7).toLocaleString()}`,
         '',
-        `✅ ${service || 'Service'} is healthy and running normally`
+        `✅ ${service || 'Service'} is healthy and running normally`,
       ];
-
+    }
     default:
-      return [
-        ...baseOutput,
-        `Executing ${action} command...`,
-        '✓ Command executed successfully',
-        '',
-        `✅ ${action} operation completed successfully!`
-      ];
+      return [...baseOutput, `Executing ${action} command...`, '✓ Command executed successfully', '', `✅ ${action} operation completed successfully!`];
   }
 }
 
@@ -271,7 +247,7 @@ function generateErrorOutput(action: string, service?: string, environment?: str
     'Network connectivity issues',
     'Authentication token expired',
     'Target service not found',
-    'Dependency service unavailable'
+    'Dependency service unavailable',
   ];
 
   const randomError = errors[Math.floor(Math.random() * errors.length)];
@@ -287,7 +263,7 @@ function generateErrorOutput(action: string, service?: string, environment?: str
     '3. Confirm permissions and credentials',
     '4. Review service logs for details',
     '',
-    `❌ ${action} operation failed. Please try again or contact support.`
+    `❌ ${action} operation failed. Please try again or contact support.`,
   ];
 }
 
@@ -300,27 +276,6 @@ app.get('/health', async (_req, res) => {
       timestamp: new Date().toISOString(),
       database: dbStatus ? 'connected' : 'disconnected',
       version: VERSION,
-      activeJobs: jobSimulations.size // 🔧 NEW: Show active job count
-    });
-  } catch (error: any) {
-    jsonError(res, 500, 'HEALTH_ERROR', error?.message || 'Unknown error');
-  }
-});
-
-// ---------- api info ----------
-app.get('/health', async (_req, res) => {
-  try {
-    const dbStatus = await supabaseService.testConnection();
-    res.json({
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      database: dbStatus ? 'connected' : 'disconnected',
-      version: VERSION,
-      nlu: {
-        hasEnvKey: Boolean(process.env.HF_API_KEY),
-        model: process.env.HF_MODEL || 'cross-encoder/nli-deberta-v3-base',
-        threshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7),
-      },
       activeJobs: jobSimulations.size,
     });
   } catch (error: any) {
@@ -328,6 +283,27 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+// ---------- api info ----------
+app.get('/api', (_req, res) => {
+  res.json({
+    name: 'DevCommandHub API',
+    version: VERSION,
+    nlu: {
+      hasEnvKey: Boolean(process.env.HF_API_KEY),
+      model: process.env.HF_MODEL || 'cross-encoder/nli-deberta-v3-base',
+      threshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7),
+    },
+    endpoints: {
+      health: 'GET /health',
+      commands: 'POST /api/commands',
+      getJob: 'GET /api/jobs/:id',
+      listJobs: 'GET /api/jobs',
+      supportedCommands: 'GET /api/commands/supported',
+      debugRole: 'GET /debug/role',
+    },
+    supportedCommands: commandParser.getSupportedCommands(),
+  });
+});
 
 // ---------- supported commands ----------
 app.get('/api/commands/supported', (_req, res) => {
@@ -346,13 +322,12 @@ app.get('/api/commands/supported', (_req, res) => {
 // ---------- core: POST /api/commands ----------
 app.post('/api/commands', async (req, res) => {
   try {
-    const { command, user_id } = req.body;
+    const { command, user_id, enableNLU, confidenceThreshold } = req.body;
 
     if (!command || typeof command !== 'string') {
       return jsonError(res, 400, 'BAD_REQUEST', 'Command is required and must be a string');
     }
 
-    // Require a real user id (no nulls). Either pass in request body or set TEST_USER_ID in .env
     const uid = resolveUserId(user_id);
     if (!uid.ok) {
       return jsonError(
@@ -362,23 +337,48 @@ app.post('/api/commands', async (req, res) => {
         'Provide "user_id" in the request body or set TEST_USER_ID in your .env.'
       );
     }
-    const userId = uid.userId; // string
+    const userId = uid.userId;
 
-    // Parse + validate
-    const parseResult = commandParser.parseCommand(command);
-    if (!parseResult.success || !parseResult.intent) {
-      return jsonError(res, 400, 'PARSE_ERROR', parseResult.error || 'Failed to parse command', {
-        suggestions: commandParser.getSupportedCommands(),
-      });
+    // Key from header (preferred) or environment.
+    // Accept both X-HF-API-Key: hf_xxx and Authorization: Bearer hf_xxx.
+    let hfApiKey: string | null =
+      (req.get("X-HF-API-Key") || req.get("x-hf-api-key")) || null;
+    const auth = req.get("Authorization") || req.get("authorization");
+    if (!hfApiKey && auth && /^Bearer\s+hf_[A-Za-z0-9]+/.test(auth)) {
+      hfApiKey = auth.replace(/^Bearer\s+/i, "").trim();
     }
-    const validation = commandParser.validateIntent(parseResult.intent);
-    if (!validation.valid) {
-      return jsonError(res, 400, 'VALIDATION_ERROR', validation.error || 'Invalid intent', {
-        parsed_intent: parseResult.intent,
-      });
+    if (!hfApiKey && process.env.HF_API_KEY) {
+      hfApiKey = process.env.HF_API_KEY;
     }
 
-    // 🔎 Debug: check DB auth role on this code path using the raw admin client
+    // Decide NLU usage + threshold
+    const nluOn = typeof enableNLU === "boolean" ? enableNLU : true;
+    const thresh =
+      typeof confidenceThreshold === "number"
+        ? confidenceThreshold
+        : Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7);
+
+    // Parse (HF with graceful fallback lives inside parseWithNLU)
+    const parsedIntent = nluOn
+      ? await parseWithNLU({ command, hfApiKey, confidenceThreshold: thresh })
+      : regexOnly(command);
+
+    // Validate only the fields the validator knows about
+    // Validate only the fields the validator expects,
+// and normalize null → undefined for compatibility.
+// Also include confidence (required by the schema).
+  const intentForValidation = {
+    action: parsedIntent.action,
+    service: parsedIntent.service ?? undefined,
+    environment: parsedIntent.environment ?? undefined,
+    replicas: parsedIntent.replicas,
+    confidence: parsedIntent.confidence,
+  };
+
+  const validation = commandParser.validateIntent(intentForValidation);
+
+
+    // (Optional) debug auth
     try {
       const { data: dbg, error: dbgErr } = await supabaseAdmin.rpc('debug_auth');
       console.log('DEBUG_AUTH RPC:', dbg || null, dbgErr || null);
@@ -386,31 +386,30 @@ app.post('/api/commands', async (req, res) => {
       console.warn('DEBUG_AUTH RPC failed:', e);
     }
 
-    // Create job via your service (types expect string)
+    // Create job
     const job = await supabaseService.createJob({
       user_id: userId,
       original_command: command,
-      parsed_intent: parseResult.intent,
-      job_type: parseResult.intent.action,
+      parsed_intent: parsedIntent,
+      job_type: parsedIntent.action,
     });
 
     if (!job) {
       return jsonError(res, 500, 'INSERT_FAILED', 'Failed to create job');
     }
 
-    // 🔧 NEW: Start job lifecycle simulation
     console.log(`[JOB ${job.id}] Created, starting simulation`);
     simulateJobExecution(
-      job.id, 
-      parseResult.intent.action,
-      parseResult.intent.service,
-      parseResult.intent.environment
+      job.id,
+      parsedIntent.action,
+      parsedIntent.service ?? undefined,
+      parsedIntent.environment ?? undefined
     );
 
     return res.status(201).json({
       success: true,
       job_id: job.id,
-      parsed_intent: parseResult.intent,
+      parsed_intent: parsedIntent,
       status: job.status,
       created_at: job.created_at,
     });
@@ -424,14 +423,10 @@ app.post('/api/commands', async (req, res) => {
 app.get('/api/jobs/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    if (!id) {
-      return jsonError(res, 400, 'BAD_REQUEST', 'Job ID is required');
-    }
+    if (!id) {return jsonError(res, 400, 'BAD_REQUEST', 'Job ID is required');}
 
     const job = await supabaseService.getJob(id);
-    if (!job) {
-      return jsonError(res, 404, 'NOT_FOUND', 'Job not found');
-    }
+    if (!job) {return jsonError(res, 404, 'NOT_FOUND', 'Job not found');}
 
     return res.json({
       success: true,
@@ -456,13 +451,13 @@ app.get('/api/jobs/:id', async (req, res) => {
   }
 });
 
-// ---------- GET /api/jobs (with basic filtering) ----------
+// ---------- GET /api/jobs ----------
 app.get('/api/jobs', async (req, res) => {
   try {
     const { user_id, status, limit } = req.query;
     const lim = limit ? Math.min(parseInt(limit as string, 10) || 50, 100) : 50;
 
-    const uid = resolveUserId(user_id, /* allowMissing */ false);
+    const uid = resolveUserId(user_id, false);
     if (!uid.ok) {
       return jsonError(
         res,
@@ -471,7 +466,7 @@ app.get('/api/jobs', async (req, res) => {
         'Provide "user_id" as a query param or set TEST_USER_ID in your .env.'
       );
     }
-    const userId = uid.userId; // string
+    const userId = uid.userId;
 
     const jobs = await supabaseService.getUserJobs(userId, lim);
     const filtered = status ? jobs.filter((j: any) => j.status === status) : jobs;
@@ -505,7 +500,7 @@ app.get('/debug/role', async (_req, res) => {
   }
 });
 
-// ---------- env debug (safe) ----------
+// ---------- env debug ----------
 app.get('/debug', (_req, res) => {
   res.json({
     env: {
@@ -515,9 +510,10 @@ app.get('/debug', (_req, res) => {
       SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY ? 'SET' : 'NOT SET',
       SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? 'SET' : 'NOT SET',
       TEST_USER_ID: TEST_USER_ID ? 'SET' : 'NOT SET',
+      HF_API_KEY: process.env.HF_API_KEY ? 'SET' : 'NOT SET',
     },
     timestamp: new Date().toISOString(),
-    activeJobs: jobSimulations.size, // 🔧 NEW: Show active job simulations
+    activeJobs: jobSimulations.size,
   });
 });
 
@@ -548,27 +544,6 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
     'INTERNAL_ERROR',
     process.env.NODE_ENV === 'development' ? err?.message : 'Something went wrong'
   );
-});
-
-// 🔧 NEW: Graceful shutdown - clean up active job simulations
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, cleaning up job simulations...');
-  jobSimulations.forEach((timeout, jobId) => {
-    clearTimeout(timeout);
-    console.log(`Cancelled simulation for job ${jobId}`);
-  });
-  jobSimulations.clear();
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, cleaning up job simulations...');
-  jobSimulations.forEach((timeout, jobId) => {
-    clearTimeout(timeout);
-    console.log(`Cancelled simulation for job ${jobId}`);
-  });
-  jobSimulations.clear();
-  process.exit(0);
 });
 
 // ---------- start ----------
