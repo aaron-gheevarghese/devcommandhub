@@ -1,9 +1,8 @@
-// src/extension.ts - Day 7 Updates (Fixed)
-import fetch from 'node-fetch';
+// src/extension.ts — Day 7 + client_hints + replicas UI
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 
-// Add interface for user info
+// ---- User & API types ----
 interface VSCodeUser {
   username: string;
   email?: string;
@@ -18,6 +17,7 @@ interface JobResponse {
     service?: string;
     environment?: string;
     confidence: number;
+    replicas?: number; // can be returned by server
   };
   status: string;
   created_at: string;
@@ -48,11 +48,26 @@ const API_ENVIRONMENTS: ApiEnvironment[] = [
   { label: 'Custom...', description: 'Enter a custom API base URL', url: 'custom' }
 ];
 
+/** ---------- Small helper: parse client-side hints from free text ---------- */
+function parseClientHints(command: string): Record<string, any> {
+  const txt = (command || '').toLowerCase();
+  // Try to infer replicas: "scale backend to 5 replicas", "replicas=4", "scale 3"
+  const m1 = txt.match(/\b(?:to|=)\s*(\d+)\s*(?:replicas?|pods?)\b/);
+  const m2 = txt.match(/\bscale\b[^\d]*(\d+)\b/);
+  const n = m1?.[1] || m2?.[1];
+  const hints: any = {};
+  if (n) {hints.replicas = Number(n);}
+  return hints;
+}
+
+// ---- Provider ----
 class DevCommandHubProvider implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private pollingJobs = new Set<string>();
   private isProcessingCommand = false;
   private currentJobId: string | null = null;
+
+  // Day 7: user state
   private currentUser: VSCodeUser | null = null;
 
   constructor(private context: vscode.ExtensionContext) {
@@ -61,69 +76,58 @@ class DevCommandHubProvider implements vscode.Disposable {
 
   dispose() {
     if (this.panel) {
+      this.pollingJobs.clear();
+      this.isProcessingCommand = false;
+      this.currentJobId = null;
       this.panel.dispose();
       this.panel = undefined;
     }
-    this.pollingJobs.clear();
-    this.isProcessingCommand = false;
-    this.currentJobId = null;
   }
 
-  // Day 7: Get real VS Code user information
+  // ---- User detection (VS Code / OS / Git fallbacks) ----
   private async initializeUser() {
     try {
-      // Try multiple methods to get user info
-      let username: string;
+      let username = 'developer';
       try {
-        // Use OS user info as fallback
         const os = await import('os');
         username = os.userInfo().username || 'developer';
-      } catch {
-        username = 'developer';
-      }
+      } catch { /* noop */ }
+
       let email: string | undefined;
       let displayName: string | undefined;
 
-      // Try to get Git user info as fallback
       try {
         const gitConfig = vscode.workspace.getConfiguration('git');
         email = gitConfig.get<string>('userEmail');
         displayName = gitConfig.get<string>('userName');
-      } catch (gitError) {
-        console.log('[DCH] Could not get Git user info:', gitError);
+      } catch (e) {
+        console.log('[DCH] Could not read git user config:', e);
       }
 
       this.currentUser = {
         username,
         email,
-        displayName: displayName || username
+        displayName: displayName || username,
       };
 
       console.log('[DCH] User initialized:', this.currentUser);
-    } catch (error) {
-      console.warn('[DCH] Failed to initialize user, using fallback:', error);
-      this.currentUser = {
-        username: 'developer',
-        displayName: 'Developer'
-      };
+    } catch (e) {
+      console.warn('[DCH] initializeUser failed, using defaults:', e);
+      this.currentUser = { username: 'developer', displayName: 'Developer' };
     }
   }
 
-  // Day 7: Get user avatar initials
   private getUserAvatarText(): string {
-    if (!this.currentUser) {return 'D';}
-    
-    const displayName = this.currentUser.displayName || this.currentUser.username;
-    if (displayName.includes(' ')) {
-      // Get first letters of first and last name
-      const parts = displayName.split(' ');
-      return (parts[0][0] + (parts[parts.length - 1][0] || '')).toUpperCase();
+    if (!this.currentUser) { return 'D'; }
+    const name = this.currentUser.displayName || this.currentUser.username || 'D';
+    if (name.includes(' ')) {
+      const parts = name.trim().split(/\s+/);
+      return ((parts[0][0] || '') + (parts[parts.length - 1][0] || '')).toUpperCase();
     }
-    
-    // Get first two letters of username/displayName
-    return displayName.substring(0, 2).toUpperCase();
+    return name.slice(0, 2).toUpperCase();
   }
 
+  // ---- Helpers ----
   private getApiBaseUrl(): string {
     return vscode.workspace.getConfiguration('devcommandhub').get('apiBaseUrl', 'http://localhost:3001');
   }
@@ -131,10 +135,11 @@ class DevCommandHubProvider implements vscode.Disposable {
   private getNonce(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let s = '';
-    for (let i = 0; i < 32; i++) {s += chars[Math.floor(Math.random() * chars.length)];}
+    for (let i = 0; i < 32; i++) { s += chars[Math.floor(Math.random() * chars.length)]; }
     return s;
   }
 
+  // ---- Webview ----
   async openWindow() {
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Beside);
@@ -151,6 +156,7 @@ class DevCommandHubProvider implements vscode.Disposable {
     const htmlPath = vscode.Uri.joinPath(this.context.extensionUri, 'media.html');
     let html = fs.readFileSync(htmlPath.fsPath, 'utf-8');
 
+    // Ensure buttons enabled on first load
     html = html
       .replace(/(<button[^>]*id="askBtn"[^>]*)(\sdisabled)?/i, '$1')
       .replace(/(<button[^>]*id="submitBtn"[^>]*)(\sdisabled)?/i, '$1');
@@ -168,27 +174,28 @@ class DevCommandHubProvider implements vscode.Disposable {
       html = html.replace(/<\/head>/i, `${cspMeta}\n</head>`);
     }
 
-    const vscodeBoot =
-      `<script nonce="${nonce}">console.log('[DCH] boot');try{window.vscode=acquireVsCodeApi();}catch(e){console.warn('acquireVsCodeApi unavailable',e);}</script>`;
-
     const controller = this.getControllerScript(nonce);
 
     const endIdx = html.toLowerCase().lastIndexOf('</body>');
-    if (endIdx >= 0) {html = html.slice(0, endIdx) + `\n${vscodeBoot}\n${controller}\n` + html.slice(endIdx);}
-    else {html += `\n${vscodeBoot}\n${controller}\n`;}
+    if (endIdx >= 0) {
+      html = html.slice(0, endIdx) + `\n${controller}\n` + html.slice(endIdx);
+    } else {
+      html += `\n${controller}\n`;
+    }
 
     this.panel.webview.html = html;
 
+    // Messages from webview
     this.panel.webview.onDidReceiveMessage(async (message) => {
       switch (message.command) {
         case 'sendDevCommand':
           await this.handleDevCommand(message.text);
           break;
         case 'refreshJob':
-          if (message.jobId) {await this.refreshJobStatus(message.jobId);}
+          if (message.jobId) { await this.refreshJobStatus(message.jobId); }
           break;
         case 'retryJob':
-          if (!message.originalCommand) {break;}
+          if (!message.originalCommand) { break; }
           if (this.isProcessingCommand) {
             this.panel?.webview.postMessage({
               command: 'showBusyMessage',
@@ -199,7 +206,6 @@ class DevCommandHubProvider implements vscode.Disposable {
           await this.handleDevCommand(message.originalCommand);
           break;
         case 'requestUserInfo':
-          // Day 7: Send current user info to webview
           this.panel?.webview.postMessage({
             command: 'updateUserInfo',
             user: this.currentUser,
@@ -216,7 +222,7 @@ class DevCommandHubProvider implements vscode.Disposable {
       this.panel = undefined;
     }, null, this.context.subscriptions);
 
-    // Day 7: Send user info immediately after panel creation
+    // Send user info to the webview shortly after creation
     if (this.currentUser) {
       setTimeout(() => {
         this.panel?.webview.postMessage({
@@ -228,8 +234,9 @@ class DevCommandHubProvider implements vscode.Disposable {
     }
   }
 
+  // ---- Command handling ----
   private async handleDevCommand(command: string) {
-    if (!this.panel) {return;}
+    if (!this.panel) { return; }
 
     if (this.isProcessingCommand) {
       console.log(`[DCH] Command already in progress, ignoring: "${command}"`);
@@ -247,7 +254,7 @@ class DevCommandHubProvider implements vscode.Disposable {
       this.panel.webview.postMessage({ command: 'showTyping' });
 
       const response = await this.sendCommandToAPI(command);
-      if (!response.success) {throw new Error('Failed to create job');}
+      if (!response.success) { throw new Error('Failed to create job'); }
 
       this.currentJobId = response.job_id;
 
@@ -291,7 +298,7 @@ class DevCommandHubProvider implements vscode.Disposable {
 
   private showErrorToast(message: string) {
     vscode.window.showErrorMessage(`DevCommandHub: ${message}`, 'Retry', 'Dismiss').then(sel => {
-      if (sel === 'Retry') {console.log('[DCH] User selected retry from error toast');}
+      if (sel === 'Retry') { console.log('[DCH] User selected retry from error toast'); }
     });
   }
 
@@ -335,7 +342,7 @@ class DevCommandHubProvider implements vscode.Disposable {
           if (this.currentJobId === jobId) {
             this.currentJobId = null;
             this.isProcessingCommand = false;
-            if (this.panel) {this.panel.webview.postMessage({ command: 'setLoadingState', loading: false });}
+            if (this.panel) { this.panel.webview.postMessage({ command: 'setLoadingState', loading: false }); }
           }
           return;
         }
@@ -347,7 +354,7 @@ class DevCommandHubProvider implements vscode.Disposable {
           if (this.currentJobId === jobId) {
             this.currentJobId = null;
             this.isProcessingCommand = false;
-            if (this.panel) {this.panel.webview.postMessage({ command: 'setLoadingState', loading: false });}
+            if (this.panel) { this.panel.webview.postMessage({ command: 'setLoadingState', loading: false }); }
           }
           return;
         }
@@ -381,30 +388,9 @@ class DevCommandHubProvider implements vscode.Disposable {
     setTimeout(poll, 2000);
   }
 
-  private async sendCommandToAPI(command: string): Promise<JobResponse> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-    try {
-      const resp = await fetch(`${this.getApiBaseUrl()}/api/commands`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command }),
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      if (!resp.ok) {throw new Error(`API request failed: ${resp.status} ${resp.statusText}`);}
-      return (await resp.json()) as JobResponse;
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (typeof error === 'object' && error && 'name' in error && (error as any).name === 'AbortError') {
-        throw new Error('Request timed out after 30 seconds');
-      }
-      throw error;
-    }
-  }
-
+  // Refresh job status and update the webview
   private async refreshJobStatus(jobId: string) {
-    if (!this.panel) {return;}
+    if (!this.panel) { return; }
     try {
       const job = await this.getJobDetails(jobId);
       this.panel.webview.postMessage({
@@ -415,8 +401,59 @@ class DevCommandHubProvider implements vscode.Disposable {
         error_message: job.error_message,
         original_command: job.original_command
       });
-    } catch (e) {
-      vscode.window.showErrorMessage(`Failed to refresh job: ${e instanceof Error ? e.message : String(e)}`);
+      const terminalStates = ['completed', 'failed', 'cancelled'];
+      if (!terminalStates.includes(job.status)) {
+        this.startJobPolling(jobId);
+      }
+    } catch (error) {
+      console.error('[DCH] Error refreshing job status:', error);
+      this.panel.webview.postMessage({
+        command: 'showPollingError',
+        jobId,
+        message: 'Failed to refresh job status'
+      });
+    }
+  }
+
+  // ---------- API calls ----------
+  private async sendCommandToAPI(command: string): Promise<JobResponse> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    const configuredUserId = vscode
+      .workspace.getConfiguration('devcommandhub')
+      .get<string>('userId', '')
+      .trim();
+
+    const clientHints = parseClientHints(command);
+
+    const payload: any = {
+      command,
+      text: command,
+      source: 'vscode',
+      client: 'DevCommandHub',
+      ...(configuredUserId ? { user_id: configuredUserId } : {}),
+      ...(Object.keys(clientHints).length ? { client_hints: clientHints } : {}),
+    };
+
+    try {
+      const resp = await fetch(`${this.getApiBaseUrl()}/api/commands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-DCH-Client': 'vscode' },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      } as RequestInit);
+
+      clearTimeout(timeoutId);
+
+      if (!resp.ok) {
+        let detail = '';
+        try { detail = await resp.text(); } catch { /* noop */ }
+        throw new Error(`API request failed: ${resp.status} ${resp.statusText}${detail ? ' — ' + detail : ''}`);
+      }
+      return (await resp.json()) as JobResponse;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -424,129 +461,129 @@ class DevCommandHubProvider implements vscode.Disposable {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
-      const resp = await fetch(`${this.getApiBaseUrl()}/api/jobs/${jobId}`, { signal: controller.signal });
+      const resp = await fetch(`${this.getApiBaseUrl()}/api/jobs/${jobId}`, { signal: controller.signal } as RequestInit);
       clearTimeout(timeoutId);
-      if (!resp.ok) {throw new Error(`Failed to fetch job details: ${resp.status} ${resp.statusText}`);}
+      if (!resp.ok) { throw new Error(`Failed to fetch job details: ${resp.status} ${resp.statusText}`); }
       const result = (await resp.json()) as { job: JobDetails };
       return result.job;
-    } catch (error) {
+    } catch (error: any) {
       clearTimeout(timeoutId);
-      if (typeof error === 'object' && error && 'name' in error && (error as any).name === 'AbortError') {
-        throw new Error('Job status request timed out');
-      }
+      if (error && error.name === 'AbortError') { throw new Error('Job status request timed out'); }
       throw error;
     }
   }
 
-  // Day 7: Enhanced controller script with output formatting and dynamic username
   private getControllerScript(nonce: string): string {
     return `
 <script nonce="${nonce}">
-(function() {
+(function () {
+  // Help: open DevTools inside the Webview: "..." -> "Open Webview Developer Tools"
+  window.onerror = function (msg, src, line, col, err) {
+    console.error('[DCH] Webview error:', msg, src + ':' + line + ':' + col, err);
+  };
+
   console.log('[DCH] controller: start');
 
   var vscode = window.vscode || (typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null);
   window.vscode = vscode;
 
-  // Day 7: User state
+  // ---------- State ----------
   var currentUser = { username: 'developer', displayName: 'Developer' };
   var currentAvatarText = 'D';
+  var isLoading = false;
+  var DEVOPS = ['deploy','scale','logs','restart','rollback','status'];
 
   function byId(id){ return document.getElementById(id); }
-  var DEVOPS = ['deploy','scale','logs','restart','rollback','status'];
   function isDevOps(txt){ txt=(txt||'').toLowerCase(); return DEVOPS.some(function(k){ return txt.indexOf(k) !== -1; }); }
 
-  var isLoading = false;
-
-  // Day 7: Enhanced syntax highlighting
+  // ---------- Highlighting ----------
   function highlightCode(text) {
     if (!text) return '';
-    
-    // Detect log types and apply appropriate highlighting
     return text
-      // JSON highlighting
       .replace(/(\\{[^}]*\\}|\\[[^\\]]*\\])/g, '<span class="syntax-json">$1</span>')
-      // Error patterns
       .replace(/(ERROR|FATAL|FAIL|Exception|Error:)/gi, '<span class="syntax-error">$1</span>')
-      // Warning patterns  
       .replace(/(WARN|WARNING|DEPRECATED)/gi, '<span class="syntax-warning">$1</span>')
-      // Success patterns
       .replace(/(SUCCESS|OK|COMPLETE|DONE|✓)/gi, '<span class="syntax-success">$1</span>')
-      // Info patterns
       .replace(/(INFO|DEBUG|LOG)/gi, '<span class="syntax-info">$1</span>')
-      // URLs
       .replace(/(https?:\\/\\/[^\\s]+)/g, '<span class="syntax-url">$1</span>')
-      // Kubernetes patterns
       .replace(/(pod|service|deployment|namespace)/gi, '<span class="syntax-k8s">$1</span>')
-      // File paths
       .replace(/(\\/[^\\s]*\\.[^\\s]*)/g, '<span class="syntax-path">$1</span>')
-      // Numbers
       .replace(/\\b(\\d+)\\b/g, '<span class="syntax-number">$1</span>');
   }
 
-  // Day 7: Collapsible output formatter
+  // ---------- Collapsible output (no inline onclicks) ----------
   function createCollapsibleOutput(content, title, type) {
     if (!content || (Array.isArray(content) && content.length === 0)) return '';
-    
-    var text = Array.isArray(content) ? content.join('\\n') : content;
+    var text = Array.isArray(content) ? content.join('\\n') : String(content);
     var lines = text.split('\\n');
-    var isLongOutput = lines.length > 10 || text.length > 1000;
-    
-    var id = 'collapse-' + Math.random().toString(36).substr(2, 9);
-    var typeClass = type === 'error' ? 'error-content' : 'output-content';
-    
-    if (!isLongOutput) {
-      // Short content - show directly with syntax highlighting
-      return '<div class="code-block ' + typeClass + '">' + highlightCode(text) + '</div>';
+    var isLong = lines.length > 10 || text.length > 1000;
+
+    var id = 'collapse-' + Math.random().toString(36).slice(2, 11);
+    var cls = (type === 'error') ? 'error-content' : 'output-content';
+
+    if (!isLong) {
+      return '<div class="code-block ' + cls + '">' + highlightCode(text) + '</div>';
     }
-    
-    // Long content - make collapsible
-    var preview = lines.slice(0, 5).join('\\n');
-    var remaining = lines.slice(5).join('\\n');
-    var remainingLines = lines.length - 5;
-    
-    return '<div class="collapsible-output">' +
-             '<div class="code-block ' + typeClass + '">' + 
-               highlightCode(preview) + 
-               '<div class="output-preview-fade"></div>' +
-             '</div>' +
-             '<button class="expand-btn" onclick="toggleOutput(\\'' + id + '\\', this)">' +
-               '▶ Show ' + remainingLines + ' more lines' +
-             '</button>' +
-             '<div id="' + id + '" class="collapsed-content" style="display: none;">' +
-               '<div class="code-block ' + typeClass + '">' + highlightCode(remaining) + '</div>' +
-               '<button class="collapse-btn" onclick="toggleOutput(\\'' + id + '\\', this)">▲ Show less</button>' +
-             '</div>' +
-           '</div>';
+
+    var preview = lines.slice(0,5).join('\\n');
+    var rest = lines.slice(5).join('\\n');
+    var more = lines.length - 5;
+
+    return ''
+      + '<div class="collapsible-output" data-block-id="' + id + '">'
+      +   '<div class="code-block ' + cls + '">'
+      +     highlightCode(preview)
+      +     '<div class="output-preview-fade"></div>'
+      +   '</div>'
+      +   '<button class="expand-btn" data-target="' + id + '">▶ Show ' + more + ' more lines</button>'
+      +   '<div id="' + id + '" class="collapsed-content" style="display:none;">'
+      +     '<div class="code-block ' + cls + '">' + highlightCode(rest) + '</div>'
+      +     '<button class="collapse-btn" data-target="' + id + '">▲ Show less</button>'
+      +   '</div>'
+      + '</div>';
   }
 
-  // Global function for collapsible toggle
-  window.toggleOutput = function(id, btn) {
-    var content = document.getElementById(id);
-    var isExpanded = content.style.display !== 'none';
-    
-    if (isExpanded) {
-      content.style.display = 'none';
-      var expandBtn = content.previousElementSibling;
-      if (expandBtn && expandBtn.className === 'expand-btn') {
-        expandBtn.style.display = 'block';
-      }
-    } else {
-      content.style.display = 'block';
-      var expandBtn = content.previousElementSibling;
-      if (expandBtn && expandBtn.className === 'expand-btn') {
-        expandBtn.style.display = 'none';
-      }
-    }
-  };
+  // Single delegated handler (CSP-safe)
+  document.addEventListener('click', function (ev) {
+    try {
+      var t = ev.target;
+      if (!t || !t.classList) return;
 
+      if (t.classList.contains('expand-btn') || t.classList.contains('collapse-btn')) {
+        var id = t.getAttribute('data-target');
+        if (!id) return;
+        var content = document.getElementById(id);
+        if (!content) return;
+
+        var expandBtn = content.previousElementSibling; // the expand button
+        var expanded = content.style.display !== 'none';
+
+        if (expanded) {
+          content.style.display = 'none';
+          if (expandBtn && expandBtn.classList && expandBtn.classList.contains('expand-btn')) {
+            expandBtn.style.display = 'block';
+          }
+        } else {
+          content.style.display = 'block';
+          if (expandBtn && expandBtn.classList && expandBtn.classList.contains('expand-btn')) {
+            expandBtn.style.display = 'none';
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[DCH] delegated click error:', e);
+    }
+  }, false);
+
+  // ---------- UI helpers ----------
   function addUserMessage(m){
     var chat = byId('chatContainer'); if (!chat) return;
     var item = document.createElement('div'); item.className='conversation-item';
     var u = document.createElement('div'); u.className='user-message';
     var av = document.createElement('div'); av.className='user-avatar'; av.textContent=currentAvatarText;
     var msg = document.createElement('div');
-    var name = document.createElement('div'); name.className='user-name'; name.textContent=currentUser.displayName;
+    var name = document.createElement('div'); name.className='user-name';
+    name.textContent = currentUser.displayName || currentUser.username || 'User';
     var txt = document.createElement('div'); txt.className='user-message-content'; txt.textContent=m;
     msg.appendChild(name); msg.appendChild(txt); u.appendChild(av); u.appendChild(msg);
     item.appendChild(u); chat.appendChild(item); chat.scrollTop = chat.scrollHeight;
@@ -567,135 +604,6 @@ class DevCommandHubProvider implements vscode.Disposable {
     chat.appendChild(wrap); chat.scrollTop = chat.scrollHeight;
   }
 
-  // Add the missing addDevResponse function
-  function addDevResponse(response) {
-    var chat = byId('chatContainer'); if (!chat) return;
-    
-    var item = document.createElement('div'); 
-    item.className = 'conversation-item';
-    item.setAttribute('data-job-id', response.job_id || '');
-    
-    var botDiv = document.createElement('div'); 
-    botDiv.className = 'bot-response';
-    
-    var head = document.createElement('div'); 
-    head.className = 'copilot-header';
-    
-    var icon = document.createElement('div'); 
-    icon.className = 'copilot-icon'; 
-    icon.textContent = '⚡';
-    
-    var label = document.createElement('div'); 
-    label.className = 'copilot-label'; 
-    label.textContent = 'DevCommandHub';
-    
-    var meta = document.createElement('div'); 
-    meta.className = 'copilot-meta';
-    
-    if (response.type === 'error') {
-      meta.textContent = 'Error';
-      var body = document.createElement('div'); 
-      body.className = 'bot-message-content error-message';
-      body.textContent = response.message;
-      
-      if (response.show_retry && response.original_command) {
-        var retryBtn = document.createElement('button');
-        retryBtn.className = 'action-btn retry-btn';
-        retryBtn.textContent = '🔄 Retry';
-        retryBtn.onclick = function() {
-          if (vscode) {
-            vscode.postMessage({
-              command: 'retryJob',
-              originalCommand: response.original_command
-            });
-          }
-        };
-        body.appendChild(retryBtn);
-      }
-    } else {
-      // Job created
-      meta.innerHTML = '<span class="status-badge ' + response.status + '">' + response.status + '</span>';
-      
-      var body = document.createElement('div'); 
-      body.className = 'bot-message-content';
-      
-      var commandDiv = document.createElement('div');
-      commandDiv.innerHTML = '<strong>Command:</strong> ' + (response.original_command || 'Unknown');
-      
-      var actionDiv = document.createElement('div');
-      actionDiv.innerHTML = '<strong>Action:</strong> ' + (response.parsed_intent?.action || 'Unknown');
-      
-      body.appendChild(commandDiv);
-      body.appendChild(actionDiv);
-      
-      // Add action buttons
-      var actionsDiv = document.createElement('div');
-      actionsDiv.style.marginTop = '8px';
-      
-      var refreshBtn = document.createElement('button');
-      refreshBtn.className = 'action-btn refresh-btn';
-      refreshBtn.textContent = '🔄 Refresh';
-      refreshBtn.onclick = function() {
-        if (vscode && response.job_id) {
-          vscode.postMessage({
-            command: 'refreshJob',
-            jobId: response.job_id
-          });
-        }
-      };
-      
-      actionsDiv.appendChild(refreshBtn);
-      body.appendChild(actionsDiv);
-    }
-    
-    head.appendChild(icon); 
-    head.appendChild(label); 
-    head.appendChild(meta);
-    botDiv.appendChild(head); 
-    botDiv.appendChild(body);
-    item.appendChild(botDiv);
-    
-    chat.appendChild(item); 
-    chat.scrollTop = chat.scrollHeight;
-  }
-
-  // Add the missing updateJobStatusInChat function
-  function updateJobStatusInChat(jobId, status, output, errorMessage, originalCommand) {
-    var item = document.querySelector('[data-job-id="' + jobId + '"]');
-    if (!item) return;
-    
-    var statusBadge = item.querySelector('.status-badge');
-    if (statusBadge) {
-      statusBadge.className = 'status-badge ' + status;
-      statusBadge.textContent = status;
-    }
-    
-    var content = item.querySelector('.bot-message-content');
-    if (!content) return;
-    
-    // Remove existing output/error sections
-    var existing = content.querySelectorAll('.output-section, .error-section');
-    existing.forEach(function(el) { el.remove(); });
-    
-    // Add output if present
-    if (output && output.length > 0) {
-      var outputSection = document.createElement('div');
-      outputSection.className = 'output-section';
-      outputSection.innerHTML = '<strong>Output:</strong>';
-      outputSection.innerHTML += createCollapsibleOutput(output, 'Output', 'output');
-      content.appendChild(outputSection);
-    }
-    
-    // Add error if present
-    if (errorMessage) {
-      var errorSection = document.createElement('div');
-      errorSection.className = 'error-section';
-      errorSection.innerHTML = '<strong>Error:</strong>';
-      errorSection.innerHTML += createCollapsibleOutput(errorMessage, 'Error', 'error');
-      content.appendChild(errorSection);
-    }
-  }
-
   function clearInput(){
     var input = byId('inputField'); if (input){ input.value=''; input.style.height='auto'; }
   }
@@ -704,121 +612,122 @@ class DevCommandHubProvider implements vscode.Disposable {
     var ask = byId('askBtn');
     var submit = byId('submitBtn');
     if (ask) {
-      if (enabled && !isLoading) {
-        ask.removeAttribute('disabled'); ask.textContent = 'Ask'; ask.classList.remove('loading');
-      } else {
-        ask.setAttribute('disabled', 'true'); ask.textContent = isLoading ? '⏳' : 'Ask'; if (isLoading) ask.classList.add('loading');
-      }
+      if (enabled && !isLoading) { ask.removeAttribute('disabled'); ask.textContent = 'Ask'; ask.classList.remove('loading'); }
+      else { ask.setAttribute('disabled', 'true'); ask.textContent = isLoading ? '⏳' : 'Ask'; if (isLoading) ask.classList.add('loading'); }
     }
     if (submit) {
-      if (enabled && !isLoading) {
-        submit.removeAttribute('disabled'); submit.textContent = '▶'; submit.classList.remove('loading');
-      } else {
-        submit.setAttribute('disabled', 'true'); submit.textContent = isLoading ? '⏳' : '▶'; if (isLoading) submit.classList.add('loading');
-      }
+      if (enabled && !isLoading) { submit.removeAttribute('disabled'); submit.textContent = '▶'; submit.classList.remove('loading'); }
+      else { submit.setAttribute('disabled', 'true'); submit.textContent = isLoading ? '⏳' : '▶'; if (isLoading) submit.classList.add('loading'); }
     }
   }
 
-  // Dedup warning toast if user spams while locked
   var busyToastVisible = false;
   function showBusyMessage(message) {
     if (busyToastVisible) return;
     busyToastVisible = true;
-
     var toast = document.createElement('div');
     toast.className = 'toast warning';
     toast.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span>⚠️</span><span>' + message + '</span></div>';
     document.body.appendChild(toast);
-
     setTimeout(function(){
       toast.style.animation='slideOut .3s ease-in forwards';
       setTimeout(function(){ toast.remove(); busyToastVisible = false; }, 300);
     }, 2000);
   }
 
-  function setLoadingState(loading) {
-    isLoading = loading;
-    setButtonsEnabled(!loading);
-    console.log('[DCH] Loading state:', loading);
-  }
+  function setLoadingState(loading) { isLoading = loading; setButtonsEnabled(!loading); }
 
   function handleSend(){
-    var input = byId('inputField'); if (!input) return;
-    var text = (input.value||'').trim(); if (!text) return;
+    try {
+      console.log('[DCH] handleSend called');
+      var input = byId('inputField'); if (!input) return;
+      var text = (input.value || '').trim();
 
-    // Optimistic lock: block double-send
-    if (isLoading) {
-      console.log('[DCH] Request in progress, ignoring send');
-      return;
-    }
+      if (!text) {
+        var toast = document.createElement('div');
+        toast.className = 'toast warning';
+        toast.textContent = 'Type something first 🙂';
+        document.body.appendChild(toast);
+        setTimeout(function(){
+          toast.style.animation='slideOut .3s ease-in forwards';
+          setTimeout(function(){ toast.remove(); }, 300);
+        }, 1200);
+        return;
+      }
 
-    addUserMessage(text);
+      if (isLoading) return;
 
-    if (isDevOps(text)) {
-      // Lock for DevOps jobs
-      isLoading = true;
-      setButtonsEnabled(false);
+      addUserMessage(text);
+
+      if (isDevOps(text)) {
+        isLoading = true; setButtonsEnabled(false);
+        clearInput();
+        if (window.vscode) window.vscode.postMessage({ command: 'sendDevCommand', text: text });
+        return;
+      }
 
       clearInput();
-      if (window.vscode) {
-        window.vscode.postMessage({ command: 'sendDevCommand', text: text });
-      }
-      return;
+      addDemoBotReply();
+      isLoading = false;
+      setButtonsEnabled(true);
+    } catch (e) {
+      console.error('[DCH] handleSend error:', e);
     }
-
-    // Demo path
-    clearInput();
-    addDemoBotReply();
-    isLoading = false;
-    setButtonsEnabled(true);
   }
 
+  // ---------- Bootstrap ----------
   function init(){
-    var input  = byId('inputField');
-    var ask    = byId('askBtn');
-    var submit = byId('submitBtn');
-    if (!input || !ask || !submit) { console.error('[DCH] missing UI elements'); return; }
+    try {
+      var input  = byId('inputField');
+      var ask    = byId('askBtn');
+      var submit = byId('submitBtn');
+      if (!input || !ask || !submit) {
+        console.error('[DCH] missing UI elements', { hasInput: !!input, hasAsk: !!ask, hasSubmit: !!submit });
+        return;
+      }
 
-    setButtonsEnabled(true);
+      setButtonsEnabled(true);
 
-    function autosize(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,120)+'px'; }
-    input.addEventListener('input', autosize); autosize();
+      function autosize(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,120)+'px'; }
+      input.addEventListener('input', autosize); autosize();
 
-    ask.addEventListener('click', handleSend);
-    submit.addEventListener('click', handleSend);
-    input.addEventListener('keydown', function(e){ if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); handleSend(); }});
-    input.focus();
-    
-    // Day 7: Request user info on init
-    if (window.vscode) {
-      window.vscode.postMessage({ command: 'requestUserInfo' });
+      ask.addEventListener('click', function(){ handleSend(); });
+      submit.addEventListener('click', function(){ handleSend(); });
+
+      input.addEventListener('keydown', function(e){
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+      });
+
+      if (window.vscode) window.vscode.postMessage({ command: 'requestUserInfo' });
+
+      console.log('[DCH] controller: bound');
+    } catch (e) {
+      console.error('[DCH] init error:', e);
     }
-    
-    console.log('[DCH] controller: bound');
   }
 
-  if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', init);
-  else init();
+  if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); }
+  else { init(); }
 
+  // ---------- Host messages ----------
   var typing = null;
   window.addEventListener('message', function(ev){
-    var m = ev.data || {};
-    if (m.command === 'showTyping') return showTyping();
-    if (m.command === 'addDevResponse') { hideTyping(); return addDevResponse(m.response); }
-    if (m.command === 'updateJobStatus') return updateJobStatusInChat(m.jobId, m.status, m.output, m.error_message, m.original_command);
-    if (m.command === 'setLoadingState') return setLoadingState(m.loading);
-    if (m.command === 'showPollingError') return showPollingError(m.jobId, m.message);
-    if (m.command === 'showBusyMessage') return showBusyMessage(m.message);
-    if (m.command === 'updateUserInfo') return updateUserInfo(m.user, m.avatarText); // Day 7
+    try {
+      var m = ev.data || {};
+      if (m.command === 'showTyping') return showTyping();
+      if (m.command === 'addDevResponse') { hideTyping(); return addDevResponse(m.response); }
+      if (m.command === 'updateJobStatus') return updateJobStatusInChat(m.jobId, m.status, m.output, m.error_message, m.original_command);
+      if (m.command === 'setLoadingState') return setLoadingState(m.loading);
+      if (m.command === 'showPollingError') return showPollingError(m.jobId, m.message);
+      if (m.command === 'showBusyMessage') return showBusyMessage(m.message);
+      if (m.command === 'updateUserInfo') return updateUserInfo(m.user, m.avatarText);
+    } catch (e) {
+      console.error('[DCH] message handler error:', e);
+    }
   });
 
-  // Day 7: Update user info
   function updateUserInfo(user, avatarText) {
-    if (user) {
-      currentUser = user;
-      currentAvatarText = avatarText || 'D';
-      console.log('[DCH] User info updated:', user);
-    }
+    if (user) { currentUser = user; currentAvatarText = avatarText || 'D'; }
   }
 
   function showTyping(){
@@ -839,9 +748,190 @@ class DevCommandHubProvider implements vscode.Disposable {
     el.appendChild(errorDiv);
   }
 
+  // ---------- Chat items ----------
+  function addDevResponse(resp){
+    var cc = byId('chatContainer'); if (!cc) return;
+
+    var item = document.createElement('div');
+    item.className = 'conversation-item';
+    if (resp && resp.job_id) item.setAttribute('data-job-id', resp.job_id);
+
+    var bot = document.createElement('div'); bot.className='bot-response';
+    var head = document.createElement('div'); head.className='copilot-header';
+    var icon = document.createElement('div'); icon.className='copilot-icon'; icon.textContent='⚡';
+    var label = document.createElement('div'); label.className='copilot-label'; label.textContent='DevCommandHub';
+    var meta = document.createElement('div'); meta.className='copilot-meta';
+    var body = document.createElement('div'); body.className='bot-message-content';
+
+    if (resp && resp.type === 'job_created') {
+      meta.innerHTML = '<span class="status-badge ' + resp.status + '">' + resp.status + '</span>';
+      var conf = (resp.parsed_intent && typeof resp.parsed_intent.confidence === 'number')
+        ? (resp.parsed_intent.confidence * 100).toFixed(1) + '%'
+        : '—';
+      body.innerHTML =
+        '<strong>Command:</strong> ' + (resp.original_command || 'Unknown') + '<br>' +
+        '<strong>Action:</strong> ' + (resp.parsed_intent && resp.parsed_intent.action || 'Unknown') + '<br>' +
+        (resp.parsed_intent && resp.parsed_intent.service ? '<strong>Service:</strong> ' + resp.parsed_intent.service + '<br>' : '') +
+        (resp.parsed_intent && resp.parsed_intent.environment ? '<strong>Environment:</strong> ' + resp.parsed_intent.environment + '<br>' : '') +
+        '<strong>Confidence:</strong> ' + conf + '<br>' +
+        // Show parsed replicas if available
+        (resp.parsed_intent && typeof resp.parsed_intent.replicas !== 'undefined'
+          ? '<strong>Replicas:</strong> ' + resp.parsed_intent.replicas + '<br>'
+          : '') +
+        '<strong>Created:</strong> ' + new Date(resp.created_at).toLocaleString() + '<br>' +
+        '<div style="margin-top:8px;"><button class="action-btn refresh-btn" id="refresh-' + resp.job_id + '">🔄 Refresh</button></div>';
+
+      body.setAttribute('data-job-id', resp.job_id || '');
+      body.setAttribute('data-original-command', resp.original_command || '');
+
+      setTimeout(function(){
+        var btn = document.getElementById('refresh-' + resp.job_id);
+        if (btn) btn.addEventListener('click', function(){
+          if (window.vscode) window.vscode.postMessage({ command: 'refreshJob', jobId: resp.job_id });
+        });
+      }, 0);
+
+    } else if (resp && resp.type === 'error') {
+      meta.textContent = 'Error';
+      body.className = 'bot-message-content error-message';
+      body.textContent = resp.message || 'Unknown error';
+      if (resp.show_retry && resp.original_command) {
+        var retryBtn = document.createElement('button');
+        retryBtn.className = 'action-btn retry-btn';
+        retryBtn.textContent = '🔄 Retry';
+        retryBtn.onclick = function(){
+          if (window.vscode) window.vscode.postMessage({ command: 'retryJob', originalCommand: resp.original_command });
+        };
+        body.appendChild(document.createElement('br'));
+        body.appendChild(retryBtn);
+      }
+    }
+
+    head.appendChild(icon); head.appendChild(label); head.appendChild(meta);
+    bot.appendChild(head); bot.appendChild(body);
+    item.appendChild(bot);
+    cc.appendChild(item);
+    cc.scrollTop = cc.scrollHeight;
+  }
+
+  function updateJobStatusInChat(jobId, status, output, errorMessage, originalCommand) {
+    var item = document.querySelector('[data-job-id="' + jobId + '"]');
+    if (!item) return;
+
+    var badge = item.querySelector('.status-badge');
+    if (badge) { badge.textContent = status; badge.className = 'status-badge ' + status; }
+
+    var content = item.querySelector('.bot-message-content');
+    if (!content) return;
+
+    content.querySelectorAll('.output-section, .error-section, .retry-section').forEach(function(n){ n.remove(); });
+
+    if (output && output.length) {
+      var o = document.createElement('div');
+      o.className = 'output-section';
+      o.innerHTML = '<strong>Output:</strong>' + createCollapsibleOutput(output, 'Output', 'output');
+      content.appendChild(o);
+    }
+
+    if (errorMessage) {
+      var er = document.createElement('div');
+      er.className = 'error-section';
+      er.innerHTML = '<strong>Error:</strong>' + createCollapsibleOutput(errorMessage, 'Error', 'error');
+      content.appendChild(er);
+    }
+
+    // ---- replicas mismatch banner (optional but helpful)
+    var desired = (function(){
+      var wanted = item.querySelector('.bot-message-content');
+      if (!wanted) return null;
+      var m = wanted.innerHTML.match(/<strong>Replicas:<\\/strong>\\s*(\\d+)/i);
+      return m ? Number(m[1]) : null;
+    })();
+
+    var actual = null;
+    if (output && output.length) {
+      var joined = Array.isArray(output) ? output.join('\\n') : String(output);
+      var m2 = joined.match(/(?:scaled?|back(?:\\s+down)?)\\s+(?:to\\s+)?(\\d+)\\s+replicas?/i);
+      if (m2) actual = Number(m2[1]);
+    }
+
+    if (desired != null && actual != null && desired !== actual) {
+      var warn = document.createElement('div');
+      warn.className = 'error-banner';
+      warn.innerHTML = '⚠️ Requested ' + desired + ' replicas but executor reports ' + actual + '.';
+      content.prepend(warn);
+    }
+
+    if (status === 'failed' && originalCommand) {
+      var r = document.createElement('div');
+      r.className = 'retry-section';
+      r.innerHTML = '<button class="action-btn retry-btn" data-command="' + originalCommand + '">🔄 Retry Job</button>';
+      var btn = r.querySelector('.retry-btn');
+      if (btn) btn.addEventListener('click', function(){
+        var cmd = this.getAttribute('data-command');
+        if (cmd && window.vscode) window.vscode.postMessage({ command:'retryJob', originalCommand: cmd });
+      });
+      content.appendChild(r);
+    }
+  }
+
 })(); 
 </script>
 `;
-  } // <-- Close getControllerScript method
+  }
+}
 
-} // <-- Close DevCommandHubProvider class
+// ---- QuickPick for API base URL ----
+async function showApiBaseQuickPick() {
+  const currentApiBase = vscode.workspace.getConfiguration('devcommandhub').get<string>('apiBaseUrl', 'http://localhost:3001');
+
+  const quickPickItems = API_ENVIRONMENTS.map(env => ({
+    label: env.label,
+    description: env.description,
+    detail: env.url === currentApiBase ? '$(check) Currently selected' : '',
+    env
+  }));
+
+  const selected = await vscode.window.showQuickPick(quickPickItems, {
+    placeHolder: 'Select API environment',
+    title: 'DevCommandHub: Set API Base URL'
+  });
+  if (!selected) { return; }
+
+  let newApiBase: string;
+  if (selected.env.url === 'custom') {
+    const customUrl = await vscode.window.showInputBox({
+      prompt: 'Enter custom API base URL',
+      value: currentApiBase,
+      validateInput: (value) => {
+        if (!value.trim()) { return 'API base URL cannot be empty'; }
+        if (!/^https?:\/\//.test(value)) { return 'URL must start with http:// or https://'; }
+        return null;
+      }
+    });
+    if (!customUrl) { return; }
+    newApiBase = customUrl.trim();
+  } else {
+    newApiBase = selected.env.url;
+  }
+
+  try {
+    await vscode.workspace.getConfiguration('devcommandhub').update('apiBaseUrl', newApiBase, vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage(`DevCommandHub API base updated to: ${newApiBase}`);
+    console.log(`[DCH] API base URL updated to: ${newApiBase}`);
+  } catch (error) {
+    vscode.window.showErrorMessage(`Failed to update API base URL: ${error}`);
+    console.error('[DCH] Error updating API base URL:', error);
+  }
+}
+
+// ---- Extension entrypoints ----
+export function activate(context: vscode.ExtensionContext) {
+  const provider = new DevCommandHubProvider(context);
+  context.subscriptions.push(
+    vscode.commands.registerCommand('devcommandhub.openWindow', () => provider.openWindow()),
+    vscode.commands.registerCommand('devcommandhub.setApiBase', showApiBaseQuickPick),
+    provider
+  );
+}
+export function deactivate() {}

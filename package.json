@@ -29,6 +29,18 @@
           "type": "string",
           "default": "http://localhost:3001",
           "description": "Base URL for DevCommandHub API"
+        },
+        "devcommandhub.enableNLU": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use Hugging Face NLU when available (falls back to regex if disabled or no API key present)."
+        },
+        "devcommandhub.confidenceThreshold": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum entailment score (0–1) required to accept an NLU-predicted action."
         }
       }
     },

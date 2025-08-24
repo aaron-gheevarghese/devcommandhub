@@ -15,131 +15,174 @@ export interface ParseResult {
   error?: string;
 }
 
+/** Normalize common environment aliases -> canonical names */
+function normalizeEnvironment(env?: string): string | undefined {
+  if (!env) {return env;}
+  const e = env.trim().toLowerCase();
+  const map: Record<string, string> = {
+    prod: 'production',
+    production: 'production',
+
+    stage: 'staging',
+    staging: 'staging',
+
+    dev: 'development',
+    develop: 'development',
+    development: 'development',
+
+    test: 'test',
+    testing: 'test',
+    qa: 'qa',
+    uat: 'uat'
+  };
+  return map[e] || e;
+}
+
+/** Safe int parse with bounds */
+function toInt(num: string, min = 0, max = 1000): number | undefined {
+  const n = parseInt(num, 10);
+  if (Number.isFinite(n) && n >= min && n <= max) {return n;}
+  return undefined;
+}
+
 class CommandParser {
-  private patterns = [
-    // Deploy patterns
+  private patterns: Array<{
+    pattern: RegExp;
+    action: ParsedIntent['action'];
+    extract: (m: RegExpMatchArray) => ParsedIntent;
+  }> = [
+    // ---------------- DEPLOY ----------------
+    // deploy <service> to <environment>
     {
-      pattern: /^deploy\s+([a-zA-Z0-9-_]+)\s+to\s+([a-zA-Z0-9-_]+)$/i,
+      // allow "to" / "onto", optional "env"/"environment"
+      pattern: /^deploy\s+([a-zA-Z0-9._-]+)\s+(?:to|onto)\s+([a-zA-Z0-9._-]+)(?:\s*(?:env|environment))?$/i,
       action: 'deploy',
-      extract: (match: RegExpMatchArray): ParsedIntent => ({
+      extract: (m) => ({
         action: 'deploy',
-        service: match[1],
-        environment: match[2],
+        service: m[1],
+        environment: normalizeEnvironment(m[2]),
         confidence: 0.9
       })
     },
+    // deploy <service>  (defaults to production)
     {
-      pattern: /^deploy\s+([a-zA-Z0-9-_]+)$/i,
+      pattern: /^deploy\s+([a-zA-Z0-9._-]+)$/i,
       action: 'deploy',
-      extract: (match: RegExpMatchArray): ParsedIntent => ({
+      extract: (m) => ({
         action: 'deploy',
-        service: match[1],
-        environment: 'production', // default
+        service: m[1],
+        environment: 'production',
         confidence: 0.8
       })
     },
 
-    // Logs patterns
+    // ---------------- LOGS ----------------
+    // show logs for/of <service>
     {
-      pattern: /^(show\s+)?(logs?\s+for|logs?)\s+([a-zA-Z0-9-_]+)$/i,
+      pattern: /^(?:show\s+)?logs?\s+(?:for|of)\s+([a-zA-Z0-9._-]+)(?:\s+last\s+(\d+)(?:\s*lines?)?)?$/i,
       action: 'logs',
-      extract: (match: RegExpMatchArray): ParsedIntent => ({
+      extract: (m) => ({
         action: 'logs',
-        service: match[3],
+        service: m[1],
+        parameters: m[2] ? { tail: toInt(m[2], 1, 5000) } : undefined,
         confidence: 0.9
       })
     },
+    // logs <service> [last N]
     {
-      pattern: /^logs?\s+([a-zA-Z0-9-_]+)$/i,
+      pattern: /^logs?\s+([a-zA-Z0-9._-]+)(?:\s+last\s+(\d+)(?:\s*lines?)?)?$/i,
       action: 'logs',
-      extract: (match: RegExpMatchArray): ParsedIntent => ({
+      extract: (m) => ({
         action: 'logs',
-        service: match[1],
+        service: m[1],
+        parameters: m[2] ? { tail: toInt(m[2], 1, 5000) } : undefined,
         confidence: 0.85
       })
     },
 
-    // Scale patterns
+    // ---------------- SCALE ----------------
+    // scale <service> to <n> [replica|replicas]
     {
-      pattern: /^scale\s+([a-zA-Z0-9-_]+)\s+to\s+(\d+)$/i,
+      pattern: /^scale\s+([a-zA-Z0-9._-]+)\s+to\s+(\d+)(?:\s*(?:replica|replicas))?$/i,
       action: 'scale',
-      extract: (match: RegExpMatchArray): ParsedIntent => ({
+      extract: (m) => ({
         action: 'scale',
-        service: match[1],
-        replicas: parseInt(match[2], 10),
+        service: m[1],
+        replicas: toInt(m[2], 0, 100),
         confidence: 0.95
       })
     },
 
-    // Rollback patterns
+    // ---------------- ROLLBACK ----------------
     {
-      pattern: /^rollback\s+([a-zA-Z0-9-_]+)$/i,
+      pattern: /^rollback\s+([a-zA-Z0-9._-]+)$/i,
       action: 'rollback',
-      extract: (match: RegExpMatchArray): ParsedIntent => ({
+      extract: (m) => ({
         action: 'rollback',
-        service: match[1],
+        service: m[1],
         confidence: 0.9
       })
     },
 
-    // Status patterns
+    // ---------------- STATUS ----------------
+    // status/health [of] <service>
     {
-      pattern: /^(status|health)\s+(of\s+)?([a-zA-Z0-9-_]+)$/i,
+      pattern: /^(?:status|health)\s+(?:of\s+)?([a-zA-Z0-9._-]+)$/i,
       action: 'status',
-      extract: (match: RegExpMatchArray): ParsedIntent => ({
+      extract: (m) => ({
         action: 'status',
-        service: match[3],
+        service: m[1],
         confidence: 0.85
       })
     },
 
-    // Restart patterns
+    // ---------------- RESTART ----------------
+    // restart <service> [in <env>]
     {
-      pattern: /^restart\s+([a-zA-Z0-9-_]+)$/i,
+      pattern: /^restart\s+([a-zA-Z0-9._-]+)(?:\s+(?:in|on)\s+([a-zA-Z0-9._-]+))?$/i,
       action: 'restart',
-      extract: (match: RegExpMatchArray): ParsedIntent => ({
+      extract: (m) => ({
         action: 'restart',
-        service: match[1],
+        service: m[1],
+        environment: normalizeEnvironment(m[2]),
         confidence: 0.9
       })
     }
   ];
 
   public parseCommand(command: string): ParseResult {
-    const trimmedCommand = command.trim();
-    
-    if (!trimmedCommand) {
-      return {
-        success: false,
-        error: 'Command cannot be empty'
-      };
+    const trimmed = (command || '').trim();
+
+    if (!trimmed) {
+      return { success: false, error: 'Command cannot be empty' };
     }
 
-    // Try each pattern
-    for (const pattern of this.patterns) {
-      const match = trimmedCommand.match(pattern.pattern);
+    for (const pat of this.patterns) {
+      const match = trimmed.match(pat.pattern);
       if (match) {
         try {
-          const intent = pattern.extract(match);
-          return {
-            success: true,
-            intent
-          };
-        } catch (error) {
-          console.error('Error extracting intent:', error);
-          continue;
+          const intent = pat.extract(match);
+          // Normalize any environment right away
+          if (intent.environment) {intent.environment = normalizeEnvironment(intent.environment);}
+          return { success: true, intent };
+        } catch (e) {
+          console.error('[Parser] extract error:', e);
+          // continue to next pattern
         }
       }
     }
 
-    // No pattern matched
+    // Helpful guidance
     return {
       success: false,
-      error: `Could not parse command: "${command}". Try commands like:
+      error:
+        `Could not parse command: "${command}". Try commands like:
 - "deploy frontend to staging"
-- "show logs for api-service"
-- "scale user-service to 3"
-- "rollback auth-service"`
+- "logs api-service last 100"
+- "scale user-service to 3 replicas"
+- "rollback auth-service"
+- "status of payments"
+- "restart backend in staging"`
     };
   }
 
@@ -147,50 +190,42 @@ class CommandParser {
     return [
       'deploy <service> to <environment>',
       'deploy <service> (defaults to production)',
-      'show logs for <service>',
-      'logs <service>',
-      'scale <service> to <number>',
+      'logs <service> [last <number>]',
+      'show logs for <service> [last <number>]',
+      'scale <service> to <number> [replicas]',
       'rollback <service>',
       'status of <service>',
-      'restart <service>'
+      'restart <service> [in <environment>]'
     ];
   }
 
   public validateIntent(intent: ParsedIntent): { valid: boolean; error?: string } {
-    // Basic validation
-    if (!intent.action) {
-      return { valid: false, error: 'Action is required' };
-    }
+    if (!intent.action) {return { valid: false, error: 'Action is required' };}
 
-    // Action-specific validation
     switch (intent.action) {
-      case 'deploy':
-        if (!intent.service) {
-          return { valid: false, error: 'Service name is required for deploy' };
-        }
-        if (!intent.environment) {
-          return { valid: false, error: 'Environment is required for deploy' };
+      case 'deploy': {
+        if (!intent.service) {return { valid: false, error: 'Service name is required for deploy' };}
+        const env = normalizeEnvironment(intent.environment);
+        if (!env) {return { valid: false, error: 'Environment is required for deploy' };}
+        intent.environment = env;
+        break;
+      }
+      case 'scale': {
+        if (!intent.service) {return { valid: false, error: 'Service name is required for scale' };}
+        const r = intent.replicas;
+        if (typeof r !== 'number' || r < 0 || r > 100) {
+          return { valid: false, error: 'Replicas must be a number between 0 and 100' };
         }
         break;
-
-      case 'scale':
-        if (!intent.service) {
-          return { valid: false, error: 'Service name is required for scale' };
-        }
-        if (!intent.replicas || intent.replicas < 0 || intent.replicas > 100) {
-          return { valid: false, error: 'Replicas must be between 0 and 100' };
-        }
-        break;
-
+      }
       case 'logs':
       case 'rollback':
       case 'status':
-      case 'restart':
-        if (!intent.service) {
-          return { valid: false, error: `Service name is required for ${intent.action}` };
-        }
+      case 'restart': {
+        if (!intent.service) {return { valid: false, error: `Service name is required for ${intent.action}` };}
+        if (intent.environment) {intent.environment = normalizeEnvironment(intent.environment);}
         break;
-
+      }
       default:
         return { valid: false, error: `Unsupported action: ${intent.action}` };
     }

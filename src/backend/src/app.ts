@@ -5,6 +5,9 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { supabaseService, supabaseAdmin } from './services/supabase';
 import { commandParser } from './services/commandParser';
+// NEW
+import { parseCommand as parseWithNLU, regexParse as regexOnly } from './services/nluService';
+
 
 dotenv.config();
 
@@ -305,21 +308,26 @@ app.get('/health', async (_req, res) => {
 });
 
 // ---------- api info ----------
-app.get('/api', (_req, res) => {
-  res.json({
-    name: 'DevCommandHub API',
-    version: VERSION,
-    endpoints: {
-      health: 'GET /health',
-      commands: 'POST /api/commands',
-      getJob: 'GET /api/jobs/:id',
-      listJobs: 'GET /api/jobs',
-      supportedCommands: 'GET /api/commands/supported',
-      debugRole: 'GET /debug/role',
-    },
-    supportedCommands: commandParser.getSupportedCommands(),
-  });
+app.get('/health', async (_req, res) => {
+  try {
+    const dbStatus = await supabaseService.testConnection();
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      database: dbStatus ? 'connected' : 'disconnected',
+      version: VERSION,
+      nlu: {
+        hasEnvKey: Boolean(process.env.HF_API_KEY),
+        model: process.env.HF_MODEL || 'cross-encoder/nli-deberta-v3-base',
+        threshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7),
+      },
+      activeJobs: jobSimulations.size,
+    });
+  } catch (error: any) {
+    jsonError(res, 500, 'HEALTH_ERROR', error?.message || 'Unknown error');
+  }
 });
+
 
 // ---------- supported commands ----------
 app.get('/api/commands/supported', (_req, res) => {
