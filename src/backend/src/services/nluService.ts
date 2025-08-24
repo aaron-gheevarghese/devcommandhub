@@ -1,5 +1,5 @@
-// backend/src/services/nluService.ts
-const HF_MODEL = process.env.HF_MODEL || "cross-encoder/nli-deberta-v3-base";
+// src/backend/src/services/nluService.ts
+const DEFAULT_HF_MODEL = (process.env.HF_MODEL || "facebook/bart-large-mnli").trim();
 
 export type ParsedIntent = {
   action: "deploy" | "rollback" | "scale" | "restart" | "logs" | "status" | "unknown";
@@ -7,78 +7,35 @@ export type ParsedIntent = {
   service: string | null;
   replicas?: number;
   confidence: number;
-  source: string;           // "hf:...", "regex", "regex-fallback", "regex-error-fallback"
+  source: string;
   debug?: unknown;
   error?: string;
 };
 
 export function regexParse(command: string): ParsedIntent {
   const c = command.toLowerCase();
-
-  // env
-  const envMatch = /\b(prod|production|staging|stage|dev|development|local)\b/.exec(c);
-
-  // service: try "<name> service" then common names
-  const svcFromPhrase = /([\w-]+)\s+(?:service|svc)\b/.exec(c)?.[1];
-  const svcList = /\b(api|backend|server|web(?:app)?|frontend|db|database|worker|auth|user)\b/.exec(c)?.[1];
-  const service = (svcFromPhrase || svcList) ?? null;
-
-  // replicas: “to 3 replicas”, “=3 pods”, “spin up 3 …”, “scale 3”
-  let replicas: number | undefined;
-  const r1 = /\b(?:to|=)\s*(\d+)\s*(?:replicas?|pods?)\b/.exec(c);
-  const r2 = /\bscale\b[^\d]*(\d+)\b/.exec(c);
-  const r3 = /\b(?:spin\s*up|bring\s*up|scale\s*up?)\s*(\d+)\b/.exec(c);
-  if (r1?.[1]) {replicas = Number(r1[1]);}
-  else if (r2?.[1]) {replicas = Number(r2[1]);}
-  else if (r3?.[1]) {replicas = Number(r3[1]);}
-
-  // action
+  const envMatch = /(prod|production|staging|stage|dev|development|local)\b/.exec(c);
+  const serviceMatch = /\b(api|backend|server|web(app)?|frontend|db|database|worker)\b/.exec(c);
+  const replicasMatch = /(\d+)\s*(replica|replicas|pods?)/.exec(c);
   const action: ParsedIntent["action"] =
     /rollback/.test(c) ? "rollback" :
-    /\b(?:spin\s*up|bring\s*up|scale|replica|autoscal)/.test(c) ? "scale" :
+    /scale|replica|autoscal/.test(c) ? "scale" :
     /restart|reboot/.test(c) ? "restart" :
-    /\blogs?/.test(c) ? "logs" :
-    /\b(status|health|ping)\b/.test(c) ? "status" :
-    /\b(deploy|release|ship)\b/.test(c) ? "deploy" :
-    "unknown";
+    /log/.test(c) ? "logs" :
+    /status|health|ping/.test(c) ? "status" :
+    /deploy|release|ship/.test(c) ? "deploy" : "unknown";
 
   return {
     action,
     environment: envMatch?.[1] ?? null,
-    service,
-    replicas,
+    service: serviceMatch?.[0] ?? null,
+    replicas: replicasMatch ? Number(replicasMatch[1]) : undefined,
     confidence: 0.5,
     source: "regex",
   };
 }
 
-async function nliEntailmentScore(premise: string, hypothesis: string, apiKey: string | null): Promise<number> {
-  const url = `https://api-inference.huggingface.co/models/${HF_MODEL}?wait_for_model=true`;
-  const input = `${premise} </s></s> ${hypothesis}`;
-
-  // helper to call once with optional auth
-  const call = async (useKey: string | null) => {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (useKey) {headers["Authorization"] = `Bearer ${useKey}`;}
-    const res = await fetch(url, { method: "POST", headers, body: JSON.stringify({ inputs: input }) });
-    return res;
-  };
-
-  let res = await call(apiKey);
-  // If the key is bad (401) or not allowed for providers (403), try anonymously once
-  if ((res.status === 401 || res.status === 403) && apiKey) {
-    res = await call(null);
-  }
-
-  if (!res.ok) {
-    throw new Error(`HF ${res.status}: ${await res.text()}`);
-  }
-  const data: any = await res.json();
-  const labels: Array<{ label: string; score: number }> =
-    Array.isArray(data) && Array.isArray(data[0]) ? data[0] :
-    Array.isArray(data) ? data : [];
-  return labels.find((x) => /entail/i.test(x.label))?.score ?? 0;
-}
+const ACTIONS = ["deploy","rollback","scale","restart","logs","status"] as const;
 
 const ACTION_HYPOTHESES = [
   { action: "deploy",   hypothesis: "The user wants to deploy a service." },
@@ -89,37 +46,134 @@ const ACTION_HYPOTHESES = [
   { action: "status",   hypothesis: "The user wants to check the status or health of services." },
 ] as const;
 
+const ZERO_SHOT_LABELS = [
+  { action: "deploy",   label: "deploy a service" },
+  { action: "rollback", label: "roll back a deployment" },
+  { action: "scale",    label: "scale replicas" },
+  { action: "restart",  label: "restart a service" },
+  { action: "logs",     label: "view logs" },
+  { action: "status",   label: "check status" },
+] as const;
+
+function isZeroShotModel(model: string) {
+  const m = model.toLowerCase();
+  return m.includes("bart-large-mnli") || m.includes("zero-shot");
+}
+
+async function fetchJson(url: string, body: any, apiKey: string) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json: any = null;
+  try { json = text ? JSON.parse(text) : null; } catch {}
+  if (!res.ok) {
+    const detail = json ? JSON.stringify(json) : text;
+    throw new Error(`HF ${res.status} for ${url.split("/").slice(-1)[0]}: ${detail || "Unknown error"}`);
+  }
+  return json;
+}
+
+async function nliEntailmentScore(premise: string, hypothesis: string, apiKey: string, model: string): Promise<number> {
+  const url = `https://api-inference.huggingface.co/models/${model}`;
+  // Try structured pair first
+  let data = await fetchJson(url, {
+    inputs: { text: premise, text_pair: hypothesis },
+    parameters: { return_all_scores: true },
+    options: { wait_for_model: true, use_cache: true },
+  }, apiKey);
+
+  // Defensive fallback to Roberta separator format if needed
+  if (!Array.isArray(data)) {
+    data = await fetchJson(url, {
+      inputs: `${premise} </s></s> ${hypothesis}`,
+      parameters: { return_all_scores: true },
+      options: { wait_for_model: true, use_cache: true },
+    }, apiKey);
+  }
+
+  const labels: Array<{ label: string; score: number }> =
+    Array.isArray(data) && Array.isArray(data[0]) ? data[0] :
+    Array.isArray(data) ? data : [];
+
+  return labels.find(x => /entail/i.test(x.label))?.score ?? 0;
+}
+
+async function zeroShotScores(input: string, apiKey: string, model: string) {
+  const url = `https://api-inference.huggingface.co/models/${model}`;
+  const labels = ZERO_SHOT_LABELS.map(z => z.label);
+  const data = await fetchJson(url, {
+    inputs: input,
+    parameters: {
+      candidate_labels: labels,
+      hypothesis_template: "The user wants to {}.",
+      multi_label: false,
+    },
+    options: { wait_for_model: true, use_cache: true },
+  }, apiKey);
+
+  const out: Array<{ action: typeof ACTIONS[number]; score: number; label: string }> = [];
+  if (Array.isArray(data?.labels) && Array.isArray(data?.scores)) {
+    for (let i = 0; i < data.labels.length; i++) {
+      const lbl = data.labels[i];
+      const sc = data.scores[i] ?? 0;
+      const mapped = ZERO_SHOT_LABELS.find(z => z.label === lbl);
+      if (mapped) {out.push({ action: mapped.action, score: sc, label: lbl });}
+    }
+  }
+  out.sort((a,b) => b.score - a.score);
+  return out;
+}
+
 export async function parseCommand(opts: {
   command: string;
   hfApiKey: string | null;
-  confidenceThreshold?: number; // default 0.7
+  confidenceThreshold?: number;
 }): Promise<ParsedIntent> {
   const { command, hfApiKey, confidenceThreshold = 0.7 } = opts;
   const coarse = regexParse(command);
 
-  // No key is fine — we’ll try anonymous first in the scorer
+  if (!hfApiKey) {return { ...coarse, source: "regex" };}
+
+  const model = DEFAULT_HF_MODEL;
+
   try {
-    const scored = await Promise.all(
-      ACTION_HYPOTHESES.map(async (h) => ({
-        ...h,
-        score: await nliEntailmentScore(command, h.hypothesis, hfApiKey),
-      }))
-    );
-    scored.sort((a, b) => b.score - a.score);
-    const top = scored[0];
+    let ranked: Array<{ action: typeof ACTIONS[number]; score: number; detail?: unknown }> = [];
+
+    if (isZeroShotModel(model)) {
+      const z = await zeroShotScores(command, hfApiKey, model);
+      ranked = z.map(({ action, score, label }) => ({ action, score, detail: { label } }));
+    } else {
+      const scores = await Promise.all(
+        ACTION_HYPOTHESES.map(async h => ({
+          action: h.action,
+          score: await nliEntailmentScore(command, h.hypothesis, hfApiKey, model),
+          detail: { hypothesis: h.hypothesis },
+        }))
+      );
+      scores.sort((a,b) => b.score - a.score);
+      ranked = scores;
+    }
+
+    const top = ranked[0];
     const accept = (top?.score ?? 0) >= confidenceThreshold;
 
     return {
-      action: accept ? top.action : coarse.action, // fall back to regex action if low confidence
+      action: accept ? top.action : "unknown",
       environment: coarse.environment,
       service: coarse.service,
       replicas: coarse.replicas,
       confidence: Number((top?.score ?? 0).toFixed(3)),
-      source: accept ? `hf:${HF_MODEL}` : "regex-fallback",
-      debug: { rankedActions: scored.slice(0, 3) },
+      source: accept ? `hf:${model}` : "regex-fallback",
+      debug: { model, threshold: confidenceThreshold, isZeroShot: isZeroShotModel(model), rankedActions: ranked.slice(0, 6) },
     };
   } catch (err: any) {
-    // Hard failure → keep regex result but explain
-    return { ...coarse, source: "regex-error-fallback", error: String(err) };
+    return { ...coarse, source: "regex-error-fallback", error: String(err), debug: { model } };
   }
 }

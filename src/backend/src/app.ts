@@ -285,13 +285,16 @@ app.get('/health', async (_req, res) => {
 
 // ---------- api info ----------
 app.get('/api', (_req, res) => {
+  const model = (process.env.HF_MODEL || 'facebook/bart-large-mnli').trim(); // <- align with nluService.ts
+  const threshold = Number(process.env.CONFIDENCE_THRESHOLD ?? 0.6);
+
   res.json({
     name: 'DevCommandHub API',
     version: VERSION,
     nlu: {
       hasEnvKey: Boolean(process.env.HF_API_KEY),
-      model: process.env.HF_MODEL || 'cross-encoder/nli-deberta-v3-base',
-      threshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7),
+      model,
+      threshold,
     },
     endpoints: {
       health: 'GET /health',
@@ -367,52 +370,55 @@ app.post('/api/commands', async (req, res) => {
     // Validate only the fields the validator expects,
 // and normalize null → undefined for compatibility.
 // Also include confidence (required by the schema).
-  const intentForValidation = {
-    action: parsedIntent.action,
-    service: parsedIntent.service ?? undefined,
-    environment: parsedIntent.environment ?? undefined,
-    replicas: parsedIntent.replicas,
-    confidence: parsedIntent.confidence,
-  };
+  // Validate only the fields the validator expects,
+// and normalize null → undefined. Include confidence.
+const intentForValidation = {
+  action: parsedIntent.action,
+  service: parsedIntent.service ?? undefined,
+  environment: parsedIntent.environment ?? undefined,
+  replicas: parsedIntent.replicas,
+  confidence: parsedIntent.confidence,
+};
 
-  const validation = commandParser.validateIntent(intentForValidation);
+const validation = commandParser.validateIntent(intentForValidation);
+if (!validation.valid) {
+  return jsonError(res, 400, 'VALIDATION_ERROR', validation.error || 'Invalid intent', {
+    parsed_intent: parsedIntent,
+  });
+}
 
+// Create job – use an explicit result object to avoid TS confusion
+const createRes = await supabaseService.createJob({
+  user_id: userId,
+  original_command: command,
+  parsed_intent: parsedIntent,
+  job_type: parsedIntent.action,
+});
 
-    // (Optional) debug auth
-    try {
-      const { data: dbg, error: dbgErr } = await supabaseAdmin.rpc('debug_auth');
-      console.log('DEBUG_AUTH RPC:', dbg || null, dbgErr || null);
-    } catch (e) {
-      console.warn('DEBUG_AUTH RPC failed:', e);
-    }
+if (createRes.error || !createRes.data) {
+  return jsonError(res, 500, 'INSERT_FAILED', 'Failed to create job', {
+    db_error: createRes.error,
+  });
+}
 
-    // Create job
-    const job = await supabaseService.createJob({
-      user_id: userId,
-      original_command: command,
-      parsed_intent: parsedIntent,
-      job_type: parsedIntent.action,
-    });
+const job = createRes.data;
 
-    if (!job) {
-      return jsonError(res, 500, 'INSERT_FAILED', 'Failed to create job');
-    }
+console.log(`[JOB ${job.id}] Created, starting simulation`);
+simulateJobExecution(
+  job.id,
+  parsedIntent.action,
+  parsedIntent.service ?? undefined,
+  parsedIntent.environment ?? undefined
+);
 
-    console.log(`[JOB ${job.id}] Created, starting simulation`);
-    simulateJobExecution(
-      job.id,
-      parsedIntent.action,
-      parsedIntent.service ?? undefined,
-      parsedIntent.environment ?? undefined
-    );
+return res.status(201).json({
+  success: true,
+  job_id: job.id,
+  parsed_intent: parsedIntent,
+  status: job.status,
+  created_at: job.created_at,
+});
 
-    return res.status(201).json({
-      success: true,
-      job_id: job.id,
-      parsed_intent: parsedIntent,
-      status: job.status,
-      created_at: job.created_at,
-    });
   } catch (error: any) {
     console.error('Error processing command:', error);
     return jsonError(res, 500, 'INTERNAL_ERROR', error?.message || 'Internal server error');

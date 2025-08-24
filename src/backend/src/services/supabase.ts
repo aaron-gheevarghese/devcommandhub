@@ -1,12 +1,9 @@
 // src/backend/src/services/supabase.ts
 import path from 'path';
 import dotenv from 'dotenv';
-
-// 👇 force-load the backend .env regardless of where you start the server from
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-
+import { createClient, type SupabaseClient, type PostgrestError } from '@supabase/supabase-js';
 
 // ---------- Types (jobs table) ----------
 export interface Job {
@@ -36,49 +33,40 @@ export interface CreateJobData {
   max_retries?: number;
 }
 
-// ---------- Env + raw admin client ----------
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
+export type CreateJobResult = { data: Job | null; error: PostgrestError | null };
 
+// ---------- Env + raw admin client ----------
+const supabaseUrl = process.env.SUPABASE_URL!;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY!;
 if (!supabaseUrl || !supabaseServiceKey) {
-  throw new Error('Missing Supabase environment variables. Check your .env (SUPABASE_URL, SUPABASE_SERVICE_KEY).');
+  throw new Error('Missing Supabase environment variables. Check SUPABASE_URL and SUPABASE_SERVICE_KEY.');
 }
 
-/**
- * Raw admin client (SERVICE ROLE). Backend-only. Bypasses RLS.
- * Use this for admin operations (debug_auth RPC, admin.createUser, internal maintenance).
- */
 export const supabaseAdmin: SupabaseClient = createClient(supabaseUrl, supabaseServiceKey, {
   auth: { autoRefreshToken: false, persistSession: false },
   global: { headers: { 'X-Client-Info': 'devcommandhub-backend/0.1.0' } },
 });
 
-// ---------- Service wrapper (uses the same admin client) ----------
-class SupabaseService {
-  private supabase: SupabaseClient;
-
-  constructor(client: SupabaseClient) {
-    // Reuse the admin client to keep a single connection/role source of truth
-    this.supabase = client;
-  }
+// Export the class so its typed surface is visible to importers
+export class SupabaseService {
+  constructor(private supabase: SupabaseClient) {}
 
   getClient(): SupabaseClient {
     return this.supabase;
   }
 
-  // Optional passthrough for RPCs if you want to keep calling via the service
   async rpc(fn: string, args?: Record<string, unknown>) {
     return this.supabase.rpc(fn, args ?? {});
   }
 
   async testConnection(): Promise<boolean> {
     try {
-      const { error } = await this.supabase.from('jobs').select('count').limit(1);
+      // light probe
+      const { error } = await this.supabase.from('jobs').select('*').limit(1);
       if (error) {
         console.error('Supabase connection test failed:', error);
         return false;
       }
-      console.log('✅ Supabase connection successful');
       return true;
     } catch (err) {
       console.error('Supabase connection error:', err);
@@ -86,33 +74,40 @@ class SupabaseService {
     }
   }
 
-  async createJob(jobData: CreateJobData): Promise<Job | null> {
+  async createJob(jobData: CreateJobData): Promise<CreateJobResult> {
     try {
       const { data, error } = await this.supabase
         .from('jobs')
-        .insert({
+        .insert([{
           user_id: jobData.user_id,
           original_command: jobData.original_command,
           parsed_intent: jobData.parsed_intent,
           job_type: jobData.job_type,
           status: 'queued',
           output: [],
-          logs: {},
+          logs: [],                // JSONB array matches your schema default
           retry_count: 0,
           max_retries: jobData.max_retries ?? 3,
-        })
-        .select()
+        }])
+        .select('*')
         .single();
 
       if (error) {
         console.error('Error creating job:', error);
-        return null;
+        return { data: null, error };
       }
-      console.log(`✅ Job created: ${data.id}`);
-      return data as Job;
-    } catch (err) {
+      return { data: data as Job, error: null };
+    } catch (err: any) {
       console.error('Unexpected error creating job:', err);
-      return null;
+      // Wrap thrown errors to PostgrestError-compatible shape
+      const wrapped: PostgrestError = {
+        message: String(err?.message ?? err),
+        details: '',
+        hint: '',
+        code: 'UNKNOWN',
+        name: ''
+      };
+      return { data: null, error: wrapped };
     }
   }
 
@@ -152,7 +147,6 @@ class SupabaseService {
         console.error('Error updating job status:', error);
         return false;
       }
-      console.log(`✅ Job ${jobId} status updated to: ${status}`);
       return true;
     } catch (err) {
       console.error('Unexpected error updating job status:', err);
@@ -163,9 +157,8 @@ class SupabaseService {
   async appendJobOutput(jobId: string, outputLine: string): Promise<boolean> {
     try {
       const job = await this.getJob(jobId);
-      if (!job) {
-        return false;
-      }
+      if (!job) {return false;}
+
       const newOutput = [...job.output, outputLine];
       const { error } = await this.supabase
         .from('jobs')
@@ -183,7 +176,7 @@ class SupabaseService {
     }
   }
 
-  async getUserJobs(userId: string, limit: number = 50): Promise<Job[]> {
+  async getUserJobs(userId: string, limit = 50): Promise<Job[]> {
     try {
       const { data, error } = await this.supabase
         .from('jobs')
@@ -204,5 +197,4 @@ class SupabaseService {
   }
 }
 
-// ✅ Named exports
 export const supabaseService = new SupabaseService(supabaseAdmin);
