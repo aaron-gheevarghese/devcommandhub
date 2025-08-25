@@ -37,7 +37,7 @@
         },
         "devcommandhub.confidenceThreshold": {
           "type": "number",
-          "default": 0.7,
+          "default": 0.6,
           "minimum": 0,
           "maximum": 1,
           "description": "Minimum entailment score (0–1) required to accept an NLU-predicted action."

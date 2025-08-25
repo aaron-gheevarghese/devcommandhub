@@ -1,18 +1,38 @@
 // src/backend/src/services/commandParser.ts
 
+export type Action = 'deploy'|'rollback'|'scale'|'restart'|'logs'|'status'|'unknown';
+
 export interface ParsedIntent {
-  action: string;
-  service?: string;
-  environment?: string;
-  replicas?: number;
+  action: Action;
+  service?: string | null;
+  environment?: string | null;
+  replicas?: number | null;
+  confidence?: number;
+  source?: string;
+  debug?: any;
   parameters?: Record<string, any>;
-  confidence: number;
 }
 
 export interface ParseResult {
   success: boolean;
   intent?: ParsedIntent;
   error?: string;
+}
+
+const REQUIRED_SLOTS: Record<Action, Array<keyof ParsedIntent>> = {
+  deploy:   ['service'],           // keep simple for now
+  rollback: ['service'],           // <-- the one we need
+  scale:    ['service','replicas'],
+  restart:  ['service'],
+  logs:     ['service'],
+  status:   [],                    // optionally require service later
+  unknown:  [],
+};
+
+export function validateIntent(intent: ParsedIntent) {
+  const req = REQUIRED_SLOTS[intent.action as Action] || [];
+  const missing = req.filter((slot) => !intent[slot] && intent[slot] !== 0);
+  return { ok: missing.length === 0, missing };
 }
 
 /** Normalize common environment aliases -> canonical names */
@@ -205,7 +225,7 @@ class CommandParser {
     switch (intent.action) {
       case 'deploy': {
         if (!intent.service) {return { valid: false, error: 'Service name is required for deploy' };}
-        const env = normalizeEnvironment(intent.environment);
+        const env = normalizeEnvironment(intent.environment ?? undefined);
         if (!env) {return { valid: false, error: 'Environment is required for deploy' };}
         intent.environment = env;
         break;

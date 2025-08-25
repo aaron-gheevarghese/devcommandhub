@@ -9,7 +9,7 @@ import dotenv from 'dotenv';
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 import { supabaseService, supabaseAdmin } from './services/supabase';
-import { commandParser } from './services/commandParser';
+import { commandParser, validateIntent } from './services/commandParser';
 import { parseCommand as parseWithNLU, regexParse as regexOnly } from './services/nluService';
 
 const app = express();
@@ -329,7 +329,7 @@ app.get('/api/commands/supported', (_req, res) => {
 // ---------- core: POST /api/commands ----------
 app.post('/api/commands', async (req, res) => {
   try {
-    const { command, user_id, enableNLU, confidenceThreshold } = req.body;
+    const { command, user_id, enableNLU, confidenceThreshold, slotOverrides } = req.body;
 
     if (!command || typeof command !== 'string') {
       return jsonError(res, 400, 'BAD_REQUEST', 'Command is required and must be a string');
@@ -379,21 +379,33 @@ app.post('/api/commands', async (req, res) => {
       ? await parseWithNLU({ command, hfApiKey, confidenceThreshold: thresh })
       : regexOnly(command);
 
-    // Validate only the fields the validator expects,
-    // and normalize null → undefined for compatibility.
-    // Also include confidence (required by the schema).
-    const intentForValidation = {
-      action: parsedIntent.action,
-      service: parsedIntent.service ?? undefined,
-      environment: parsedIntent.environment ?? undefined,
-      replicas: parsedIntent.replicas,
-      confidence: parsedIntent.confidence,
-    };
+    // Apply slot overrides
+    const intent = { ...parsedIntent };
+    const overrides = slotOverrides || {};
+    if (overrides.service) {intent.service = String(overrides.service);}
+    if (overrides.environment) {intent.environment = String(overrides.environment);}
+    if (overrides.replicas !== null) {intent.replicas = Number(overrides.replicas);}
 
-    const validation = commandParser.validateIntent(intentForValidation);
+    // Validate required slots
+    const { ok, missing } = validateIntent(intent);
+    if (!ok) {
+      // Don't create a job yet — ask the client to fill the missing slot(s)
+      return res.status(422).json({
+        success: false,
+        code: 'MISSING_SLOT',
+        message: intent.action === 'rollback'
+          ? 'Which service should I roll back?'
+          : `Missing required field(s): ${missing.join(', ')}`,
+        missing,
+        parsed_intent: intent,
+      });
+    }
+
+    // Validate business logic using the class method
+    const validation = commandParser.validateIntent(intent);
     if (!validation.valid) {
       return jsonError(res, 400, 'VALIDATION_ERROR', validation.error || 'Invalid intent', {
-        parsed_intent: parsedIntent,
+        parsed_intent: intent,
       });
     }
 
@@ -401,8 +413,8 @@ app.post('/api/commands', async (req, res) => {
     const createRes = await supabaseService.createJob({
       user_id: userId,
       original_command: command,
-      parsed_intent: parsedIntent,
-      job_type: parsedIntent.action,
+      parsed_intent: intent,
+      job_type: intent.action,
     });
 
     if (createRes.error || !createRes.data) {
@@ -416,15 +428,15 @@ app.post('/api/commands', async (req, res) => {
     console.log(`[JOB ${job.id}] Created, starting simulation`);
     simulateJobExecution(
       job.id,
-      parsedIntent.action,
-      parsedIntent.service ?? undefined,
-      parsedIntent.environment ?? undefined
+      intent.action,
+      intent.service ?? undefined,
+      intent.environment ?? undefined
     );
 
     return res.status(201).json({
       success: true,
       job_id: job.id,
-      parsed_intent: parsedIntent,
+      parsed_intent: intent,
       status: job.status,
       created_at: job.created_at,
     });

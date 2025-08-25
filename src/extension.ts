@@ -1,6 +1,8 @@
 // src/extension.ts — Day 8: NLU flags + client_hints + replicas UI
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
+
 
 // ---- User & API types ----
 interface VSCodeUser {
@@ -130,6 +132,25 @@ class DevCommandHubProvider implements vscode.Disposable {
     }
   }
 
+  private isUuid(s?: string): boolean {
+  return !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+}
+
+private getStableUserId(): string {
+  // 1) prefer a valid UUID from settings (if set)
+  const cfgId = vscode.workspace.getConfiguration('devcommandhub').get<string>('userId', '')?.trim();
+  if (this.isUuid(cfgId)) {return cfgId!;}
+
+  // 2) otherwise cache one in globalState
+  let cached = this.context.globalState.get<string>('dch.userId');
+  if (this.isUuid(cached)) {return cached!;}
+
+  cached = randomUUID();
+  this.context.globalState.update('dch.userId', cached);
+  return cached;
+}
+
+
   private getUserAvatarText(): string {
     if (!this.currentUser) { return 'D'; }
     const name = this.currentUser.displayName || this.currentUser.username || 'D';
@@ -149,7 +170,7 @@ class DevCommandHubProvider implements vscode.Disposable {
   private getNluSettings(): { enableNLU: boolean; confidenceThreshold: number; userId?: string } {
     const cfg = vscode.workspace.getConfiguration('devcommandhub');
     const enableNLU = cfg.get<boolean>('enableNLU', true);
-    const confidenceThreshold = cfg.get<number>('confidenceThreshold', 0.7);
+    const confidenceThreshold = cfg.get<number>('confidenceThreshold', 0.6);
     const userId = cfg.get<string>('userId', '')?.trim() || undefined;
     return { enableNLU, confidenceThreshold, userId };
   }
@@ -375,7 +396,7 @@ class DevCommandHubProvider implements vscode.Disposable {
 
           if (this.currentJobId === jobId) {
             this.currentJobId = null;
-                       this.isProcessingCommand = false;
+            this.isProcessingCommand = false;
             if (this.panel) { this.panel.webview.postMessage({ command: 'setLoadingState', loading: false }); }
           }
           return;
@@ -438,52 +459,88 @@ class DevCommandHubProvider implements vscode.Disposable {
   }
 
   // ---------- API calls ----------
-  private async sendCommandToAPI(command: string): Promise<JobResponse> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-
-    // NEW: read settings once per request
-    const { enableNLU, confidenceThreshold, userId } = this.getNluSettings();
-
-    const clientHints = parseClientHints(command);
-
-    const payload: any = {
-      command,
-      text: command,
-      source: 'vscode',
-      client: 'DevCommandHub',
-      enableNLU,                 // NEW
-      confidenceThreshold,       // NEW
-      ...(userId ? { user_id: userId } : {}),
-      ...(Object.keys(clientHints).length ? { client_hints: clientHints } : {}),
-    };
-
-    try {
-      const resp = await fetch(`${this.getApiBaseUrl()}/api/commands`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-DCH-Client': 'vscode' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      } as RequestInit);
-
-      clearTimeout(timeoutId);
-
-      if (!resp.ok) {
-        let detail = '';
-        try { detail = await resp.text(); } catch { /* noop */ }
-        throw new Error(`API request failed: ${resp.status} ${resp.statusText}${detail ? ' — ' + detail : ''}`);
-      }
-      return (await resp.json()) as JobResponse;
-    } finally {
-      clearTimeout(timeoutId);
-    }
+  private getHFHeaders(): Record<string, string> {
+    // Read from settings: devcommandhub.hfToken (string)
+    const token = vscode.workspace.getConfiguration('devcommandhub')
+      .get<string>('hfToken', '')?.trim();
+    return token ? { 'X-HF-API-Key': token } : {};
   }
+
+  p;// ---------- API calls ----------
+// ---------- API calls ----------
+private async sendCommandToAPI(command: string, opts?: { slotOverrides?: Record<string, any> }): Promise<any> {
+  const apiBase = this.getApiBaseUrl();
+
+  // NLU flags from settings
+  const { enableNLU, confidenceThreshold } = this.getNluSettings();
+
+  // client-side hints (replicas, etc.)
+  const clientHints = parseClientHints(command);
+
+  // build body with a guaranteed UUID
+  const body: any = {
+    command,
+    enableNLU,
+    confidenceThreshold,
+    clientHints,
+    user_id: this.getStableUserId(),
+  };
+  if (opts?.slotOverrides) {body.slotOverrides = opts.slotOverrides;}
+
+  // (optional) HF header if you have one
+  const hfKey = process.env.HF_API_KEY || '';
+  const hfHeader = hfKey ? { 'X-HF-API-Key': hfKey } : undefined;
+
+  const res = await fetch(`${apiBase}/api/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(hfHeader ?? {}) },
+    body: JSON.stringify(body),
+  });
+
+  const data = await res.json().catch(() => ({} as any));
+
+  if (!res.ok) {
+    // slot-filling (e.g. rollback missing service)
+    if (res.status === 422 && (data as any)?.code === 'MISSING_SLOT' && Array.isArray((data as any).missing)) {
+      if ((data as any).missing.includes('service')) {
+        const cfg = vscode.workspace.getConfiguration('devcommandhub');
+        const known = cfg.get<string[]>('services', ['frontend','api','backend','auth-service','user-service','database-service']);
+        const picked = await vscode.window.showQuickPick(known.map(label => ({ label })), {
+          placeHolder: (data as any)?.message ?? 'Pick a service',
+        });
+        const service = picked?.label || await vscode.window.showInputBox({
+          prompt: (data as any)?.message ?? 'Which service?',
+          placeHolder: 'e.g. auth-service',
+        });
+        if (!service) {throw new Error('User cancelled slot fill');}
+
+        const retryBody = { ...body, slotOverrides: { ...(body.slotOverrides || {}), service } };
+        const retryRes = await fetch(`${apiBase}/api/commands`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(hfHeader ?? {}) },
+          body: JSON.stringify(retryBody),
+        });
+        if (!retryRes.ok) {
+          const err = await retryRes.text();
+          throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
+        }
+        return retryRes.json();
+      }
+    }
+
+    throw new Error(`API request failed: ${res.status} ${res.statusText} — ${JSON.stringify(data)}`);
+  }
+
+  return data;
+}
+
+
 
   private async getJobDetails(jobId: string): Promise<JobDetails> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
-      const resp = await fetch(`${this.getApiBaseUrl()}/api/jobs/${jobId}`, { signal: controller.signal } as RequestInit);
+      const resp = await fetch(`${this.getApiBaseUrl()}/api/jobs/${jobId}`, { signal: controller.signal });
       clearTimeout(timeoutId);
       if (!resp.ok) { throw new Error(`Failed to fetch job details: ${resp.status} ${resp.statusText}`); }
       const result = (await resp.json()) as { job: JobDetails };
@@ -514,7 +571,6 @@ class DevCommandHubProvider implements vscode.Disposable {
   var isLoading = false;
 
   function byId(id){ return document.getElementById(id); }
-  function isDevOps(txt){ txt=(txt||'').toLowerCase(); return DEVOPS.some(function(k){ return txt.indexOf(k) !== -1; }); }
 
   // ---------- Highlighting ----------
   function highlightCode(text) {
@@ -609,21 +665,6 @@ class DevCommandHubProvider implements vscode.Disposable {
     item.appendChild(u); chat.appendChild(item); chat.scrollTop = chat.scrollHeight;
   }
 
-  function addDemoBotReply(){
-    var chat = byId('chatContainer'); if (!chat) return;
-    var botDiv = document.createElement('div'); botDiv.className='bot-response';
-    var head = document.createElement('div'); head.className='copilot-header';
-    var icon = document.createElement('div'); icon.className='copilot-icon'; icon.textContent='⚡';
-    var label = document.createElement('div'); label.className='copilot-label'; label.textContent='DevCommandHub';
-    var meta = document.createElement('div'); meta.className='copilot-meta'; meta.textContent='Demo';
-    head.appendChild(icon); head.appendChild(label); head.appendChild(meta);
-    var body = document.createElement('div'); body.className='bot-message-content';
-    body.textContent = "I'm a demo assistant. I can help you with coding questions, explain concepts, and assist with development tasks!";
-    var wrap = document.createElement('div'); wrap.className='conversation-item';
-    wrap.appendChild(botDiv); botDiv.appendChild(head); botDiv.appendChild(body);
-    chat.appendChild(wrap); chat.scrollTop = chat.scrollHeight;
-  }
-
   function clearInput(){
     var input = byId('inputField'); if (input){ input.value=''; input.style.height='auto'; }
   }
@@ -658,37 +699,36 @@ class DevCommandHubProvider implements vscode.Disposable {
   function setLoadingState(loading) { isLoading = loading; setButtonsEnabled(!loading); }
 
   function handleSend(){
-  try {
-    console.log('[DCH] handleSend called');
-    var input = byId('inputField'); if (!input) return;
-    var text = (input.value || '').trim();
+    try {
+      console.log('[DCH] handleSend called');
+      var input = byId('inputField'); if (!input) return;
+      var text = (input.value || '').trim();
 
-    if (!text) {
-      var toast = document.createElement('div');
-      toast.className = 'toast warning';
-      toast.textContent = 'Type something first 🙂';
-      document.body.appendChild(toast);
-      setTimeout(function(){
-        toast.style.animation='slideOut .3s ease-in forwards';
-        setTimeout(function(){ toast.remove(); }, 300);
-      }, 1200);
-      return;
+      if (!text) {
+        var toast = document.createElement('div');
+        toast.className = 'toast warning';
+        toast.textContent = 'Type something first 🙂';
+        document.body.appendChild(toast);
+        setTimeout(function(){
+          toast.style.animation='slideOut .3s ease-in forwards';
+          setTimeout(function(){ toast.remove(); }, 300);
+        }, 1200);
+        return;
+      }
+
+      if (isLoading) return;
+
+      addUserMessage(text);
+
+      // ⬇️ Always send to backend — server will do regex + HF NLU
+      isLoading = true; 
+      setButtonsEnabled(false);
+      clearInput();
+      if (window.vscode) window.vscode.postMessage({ command: 'sendDevCommand', text: text });
+    } catch (e) {
+      console.error('[DCH] handleSend error:', e);
     }
-
-    if (isLoading) return;
-
-    addUserMessage(text);
-
-    // ⬇️ Always send to backend — server will do regex + HF NLU
-    isLoading = true; 
-    setButtonsEnabled(false);
-    clearInput();
-    if (window.vscode) window.vscode.postMessage({ command: 'sendDevCommand', text: text });
-  } catch (e) {
-    console.error('[DCH] handleSend error:', e);
   }
-}
-
 
   // ---------- Bootstrap ----------
   function init(){
@@ -954,4 +994,5 @@ export function activate(context: vscode.ExtensionContext) {
     provider
   );
 }
+
 export function deactivate() {}
