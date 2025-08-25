@@ -2,12 +2,15 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import path from 'path';
 import dotenv from 'dotenv';
+
+// ✅ CRITICAL FIX: Force load the same .env file as other modules
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+
 import { supabaseService, supabaseAdmin } from './services/supabase';
 import { commandParser } from './services/commandParser';
 import { parseCommand as parseWithNLU, regexParse as regexOnly } from './services/nluService';
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -285,7 +288,8 @@ app.get('/health', async (_req, res) => {
 
 // ---------- api info ----------
 app.get('/api', (_req, res) => {
-  const model = (process.env.HF_MODEL || 'facebook/bart-large-mnli').trim(); // <- align with nluService.ts
+  // ✅ CRITICAL FIX: Use the same default as nluService.ts
+  const model = (process.env.HF_MODEL || 'facebook/bart-large-mnli').trim();
   const threshold = Number(process.env.CONFIDENCE_THRESHOLD ?? 0.6);
 
   res.json({
@@ -361,63 +365,69 @@ app.post('/api/commands', async (req, res) => {
         ? confidenceThreshold
         : Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7);
 
+    // ✅ ADD DEBUG LOGGING to see what we're actually using
+    console.log('[NLU]', {
+      headerKey: Boolean(req.get('X-HF-API-Key') || req.get('Authorization')),
+      envKey: Boolean(process.env.HF_API_KEY),
+      model: process.env.HF_MODEL,
+      threshold: thresh,
+      nluEnabled: nluOn,
+    });
+
     // Parse (HF with graceful fallback lives inside parseWithNLU)
     const parsedIntent = nluOn
       ? await parseWithNLU({ command, hfApiKey, confidenceThreshold: thresh })
       : regexOnly(command);
 
-    // Validate only the fields the validator knows about
     // Validate only the fields the validator expects,
-// and normalize null → undefined for compatibility.
-// Also include confidence (required by the schema).
-  // Validate only the fields the validator expects,
-// and normalize null → undefined. Include confidence.
-const intentForValidation = {
-  action: parsedIntent.action,
-  service: parsedIntent.service ?? undefined,
-  environment: parsedIntent.environment ?? undefined,
-  replicas: parsedIntent.replicas,
-  confidence: parsedIntent.confidence,
-};
+    // and normalize null → undefined for compatibility.
+    // Also include confidence (required by the schema).
+    const intentForValidation = {
+      action: parsedIntent.action,
+      service: parsedIntent.service ?? undefined,
+      environment: parsedIntent.environment ?? undefined,
+      replicas: parsedIntent.replicas,
+      confidence: parsedIntent.confidence,
+    };
 
-const validation = commandParser.validateIntent(intentForValidation);
-if (!validation.valid) {
-  return jsonError(res, 400, 'VALIDATION_ERROR', validation.error || 'Invalid intent', {
-    parsed_intent: parsedIntent,
-  });
-}
+    const validation = commandParser.validateIntent(intentForValidation);
+    if (!validation.valid) {
+      return jsonError(res, 400, 'VALIDATION_ERROR', validation.error || 'Invalid intent', {
+        parsed_intent: parsedIntent,
+      });
+    }
 
-// Create job – use an explicit result object to avoid TS confusion
-const createRes = await supabaseService.createJob({
-  user_id: userId,
-  original_command: command,
-  parsed_intent: parsedIntent,
-  job_type: parsedIntent.action,
-});
+    // Create job – use an explicit result object to avoid TS confusion
+    const createRes = await supabaseService.createJob({
+      user_id: userId,
+      original_command: command,
+      parsed_intent: parsedIntent,
+      job_type: parsedIntent.action,
+    });
 
-if (createRes.error || !createRes.data) {
-  return jsonError(res, 500, 'INSERT_FAILED', 'Failed to create job', {
-    db_error: createRes.error,
-  });
-}
+    if (createRes.error || !createRes.data) {
+      return jsonError(res, 500, 'INSERT_FAILED', 'Failed to create job', {
+        db_error: createRes.error,
+      });
+    }
 
-const job = createRes.data;
+    const job = createRes.data;
 
-console.log(`[JOB ${job.id}] Created, starting simulation`);
-simulateJobExecution(
-  job.id,
-  parsedIntent.action,
-  parsedIntent.service ?? undefined,
-  parsedIntent.environment ?? undefined
-);
+    console.log(`[JOB ${job.id}] Created, starting simulation`);
+    simulateJobExecution(
+      job.id,
+      parsedIntent.action,
+      parsedIntent.service ?? undefined,
+      parsedIntent.environment ?? undefined
+    );
 
-return res.status(201).json({
-  success: true,
-  job_id: job.id,
-  parsed_intent: parsedIntent,
-  status: job.status,
-  created_at: job.created_at,
-});
+    return res.status(201).json({
+      success: true,
+      job_id: job.id,
+      parsed_intent: parsedIntent,
+      status: job.status,
+      created_at: job.created_at,
+    });
 
   } catch (error: any) {
     console.error('Error processing command:', error);
@@ -517,6 +527,8 @@ app.get('/debug', (_req, res) => {
       SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? 'SET' : 'NOT SET',
       TEST_USER_ID: TEST_USER_ID ? 'SET' : 'NOT SET',
       HF_API_KEY: process.env.HF_API_KEY ? 'SET' : 'NOT SET',
+      HF_MODEL: process.env.HF_MODEL || 'facebook/bart-large-mnli (default)',
+      CONFIDENCE_THRESHOLD: process.env.CONFIDENCE_THRESHOLD || '0.6 (default)',
     },
     timestamp: new Date().toISOString(),
     activeJobs: jobSimulations.size,

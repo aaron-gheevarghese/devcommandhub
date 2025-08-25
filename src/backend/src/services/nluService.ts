@@ -1,4 +1,10 @@
 // src/backend/src/services/nluService.ts
+import path from 'path';
+import dotenv from 'dotenv';
+
+// ✅ CRITICAL FIX: Force load the same .env file as other modules
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
 const DEFAULT_HF_MODEL = (process.env.HF_MODEL || "facebook/bart-large-mnli").trim();
 
 export type ParsedIntent = {
@@ -139,17 +145,24 @@ export async function parseCommand(opts: {
   const { command, hfApiKey, confidenceThreshold = 0.7 } = opts;
   const coarse = regexParse(command);
 
-  if (!hfApiKey) {return { ...coarse, source: "regex" };}
+  if (!hfApiKey) {
+    console.log('[NLU] No HF API key provided, using regex fallback');
+    return { ...coarse, source: "regex" };
+  }
 
   const model = DEFAULT_HF_MODEL;
+  console.log(`[NLU] Using model: ${model}, threshold: ${confidenceThreshold}`);
 
   try {
     let ranked: Array<{ action: typeof ACTIONS[number]; score: number; detail?: unknown }> = [];
 
     if (isZeroShotModel(model)) {
+      console.log('[NLU] Using zero-shot classification');
       const z = await zeroShotScores(command, hfApiKey, model);
       ranked = z.map(({ action, score, label }) => ({ action, score, detail: { label } }));
+      console.log(`[NLU] Zero-shot results:`, ranked.slice(0, 3));
     } else {
+      console.log('[NLU] Using NLI classification');
       const scores = await Promise.all(
         ACTION_HYPOTHESES.map(async h => ({
           action: h.action,
@@ -159,10 +172,13 @@ export async function parseCommand(opts: {
       );
       scores.sort((a,b) => b.score - a.score);
       ranked = scores;
+      console.log(`[NLU] NLI results:`, ranked.slice(0, 3));
     }
 
     const top = ranked[0];
     const accept = (top?.score ?? 0) >= confidenceThreshold;
+    
+    console.log(`[NLU] Top result: ${top?.action} (${top?.score?.toFixed(3)}), accept: ${accept}`);
 
     return {
       action: accept ? top.action : "unknown",
@@ -171,9 +187,20 @@ export async function parseCommand(opts: {
       replicas: coarse.replicas,
       confidence: Number((top?.score ?? 0).toFixed(3)),
       source: accept ? `hf:${model}` : "regex-fallback",
-      debug: { model, threshold: confidenceThreshold, isZeroShot: isZeroShotModel(model), rankedActions: ranked.slice(0, 6) },
+      debug: { 
+        model, 
+        threshold: confidenceThreshold, 
+        isZeroShot: isZeroShotModel(model), 
+        rankedActions: ranked.slice(0, 6) 
+      },
     };
   } catch (err: any) {
-    return { ...coarse, source: "regex-error-fallback", error: String(err), debug: { model } };
+    console.error('[NLU] HF API error:', err.message);
+    return { 
+      ...coarse, 
+      source: "regex-error-fallback", 
+      error: String(err), 
+      debug: { model } 
+    };
   }
 }
