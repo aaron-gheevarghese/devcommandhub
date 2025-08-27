@@ -6,6 +6,8 @@
 	"search.exclude": {
 		"out": true // set this to false to include "out" folder in search results
 	},
-	// Turn off tsc task auto detection since we have the necessary tasks as npm scripts
-	"typescript.tsc.autoDetect": "off"
+
+	"devcommandhub.enableNLU": true,
+	"devcommandhub.confidenceThreshold": 0.6,
+	"devcommandhub.userId": "a8d0aa19-67a5-481b-9617-7fbdfad126bf"
 }

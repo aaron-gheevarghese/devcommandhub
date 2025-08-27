@@ -468,32 +468,39 @@ private getStableUserId(): string {
 
   p;// ---------- API calls ----------
 // ---------- API calls ----------
+// Updated sendCommandToAPI method
 private async sendCommandToAPI(command: string, opts?: { slotOverrides?: Record<string, any> }): Promise<any> {
+  const { enableNLU, confidenceThreshold, userId } = this.getNluSettings();
   const apiBase = this.getApiBaseUrl();
-
-  // NLU flags from settings
-  const { enableNLU, confidenceThreshold } = this.getNluSettings();
+  const validUUID = (s: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  
+  // Add user ID header if valid UUID
+  if (userId && validUUID(userId)) {
+    headers['X-DCH-User-Id'] = userId;   // header for server side convenience
+  }
 
   // client-side hints (replicas, etc.)
   const clientHints = parseClientHints(command);
 
-  // build body with a guaranteed UUID
+  // build body with user_id if valid UUID
   const body: any = {
     command,
     enableNLU,
-    confidenceThreshold,
     clientHints,
-    user_id: this.getStableUserId(),
+    ...(typeof confidenceThreshold === 'number' ? { confidenceThreshold } : {}),
+    ...(userId && validUUID(userId) ? { user_id: userId } : { user_id: this.getStableUserId() })
   };
-  if (opts?.slotOverrides) {body.slotOverrides = opts.slotOverrides;}
-
-  // (optional) HF header if you have one
-  const hfKey = process.env.HF_API_KEY || '';
-  const hfHeader = hfKey ? { 'X-HF-API-Key': hfKey } : undefined;
+  
+  if (opts?.slotOverrides) {
+    body.slotOverrides = opts.slotOverrides;
+  }
 
   const res = await fetch(`${apiBase}/api/commands`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(hfHeader ?? {}) },
+    headers,
     body: JSON.stringify(body),
   });
 
@@ -517,7 +524,7 @@ private async sendCommandToAPI(command: string, opts?: { slotOverrides?: Record<
         const retryBody = { ...body, slotOverrides: { ...(body.slotOverrides || {}), service } };
         const retryRes = await fetch(`${apiBase}/api/commands`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(hfHeader ?? {}) },
+          headers,
           body: JSON.stringify(retryBody),
         });
         if (!retryRes.ok) {

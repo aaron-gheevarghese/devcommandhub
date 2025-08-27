@@ -1,4 +1,5 @@
-// src/backend/src/app.ts
+// src/backend/src/app.ts - Day 8 fixes for user_id handling and parsed_intent responses
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -46,19 +47,58 @@ function jsonError(
   return res.status(status).json({ success: false, code, message, ...(extra || {}) });
 }
 
-function resolveUserId(
-  reqBodyUserId?: unknown,
-  allowMissing = false
-): { ok: true; userId: string } | { ok: false; res: express.Response; status: number } {
-  const candidate =
-    (typeof reqBodyUserId === 'string' && reqBodyUserId.trim().length > 0
-      ? reqBodyUserId.trim()
-      : undefined) ?? TEST_USER_ID;
+// ✅ Enhanced user ID resolution with header support
+function resolveUserId(req: express.Request, allowMissing = false): string | null {
+  // Priority order: header → body → query → environment → null
+  const headerUserId = req.get('X-DCH-User-Id') || req.get('x-dch-user-id');
+  const bodyUserId = req.body?.user_id;
+  const queryUserId = req.query?.user_id as string;
+  
+  const candidate = 
+    (typeof headerUserId === 'string' && headerUserId.trim().length > 0 ? headerUserId.trim() : null) ||
+    (typeof bodyUserId === 'string' && bodyUserId.trim().length > 0 ? bodyUserId.trim() : null) ||
+    (typeof queryUserId === 'string' && queryUserId.trim().length > 0 ? queryUserId.trim() : null) ||
+    (TEST_USER_ID && TEST_USER_ID.trim().length > 0 ? TEST_USER_ID.trim() : null);
 
-  if (candidate && candidate.length > 0) {return { ok: true, userId: candidate };}
-  if (allowMissing) {return { ok: true, userId: '' };}
+  console.log('[API] User ID resolution:', {
+    header: Boolean(headerUserId),
+    body: Boolean(bodyUserId),
+    query: Boolean(queryUserId),
+    env: Boolean(TEST_USER_ID),
+    resolved: candidate ? candidate.slice(0, 8) + '...' : null
+  });
 
-  return { ok: false, res: {} as express.Response, status: 400 };
+  if (candidate) {
+    return candidate;
+  }
+  
+  if (allowMissing) {
+    return null;
+  }
+  
+  return null;
+}
+
+// ✅ Ensure user exists in users table before creating jobs
+async function ensureUser(_userId: string, _displayName?: string): Promise<{ success: boolean; error?: string }> {
+  // Day 8: no user table needed; don't block job creation
+  return { success: true };
+}
+
+// ✅ Helper function to extract HF API key from request
+function extractHfApiKey(req: express.Request): string | null {
+  // Key from header (preferred) or environment.
+  // Accept both X-HF-API-Key: hf_xxx and Authorization: Bearer hf_xxx.
+  let hfApiKey: string | null =
+    (req.get("X-HF-API-Key") || req.get("x-hf-api-key")) || null;
+  const auth = req.get("Authorization") || req.get("authorization");
+  if (!hfApiKey && auth && /^Bearer\s+hf_[A-Za-z0-9]+/.test(auth)) {
+    hfApiKey = auth.replace(/^Bearer\s+/i, "").trim();
+  }
+  if (!hfApiKey && process.env.HF_API_KEY) {
+    hfApiKey = process.env.HF_API_KEY;
+  }
+  return hfApiKey;
 }
 
 // ---------- job simulation ----------
@@ -288,7 +328,7 @@ app.get('/health', async (_req, res) => {
 
 // ---------- api info ----------
 app.get('/api', (_req, res) => {
-  // ✅ CRITICAL FIX: Use the same default as nluService.ts
+  // ✅ Use the same default as nluService.ts
   const model = (process.env.HF_MODEL || 'facebook/bart-large-mnli').trim();
   const threshold = Number(process.env.CONFIDENCE_THRESHOLD ?? 0.6);
 
@@ -326,37 +366,38 @@ app.get('/api/commands/supported', (_req, res) => {
   });
 });
 
-// ---------- core: POST /api/commands ----------
+// ✅ FIXED: POST /api/commands with proper user handling and always return parsed_intent
 app.post('/api/commands', async (req, res) => {
+  let parsedIntent: any = null; // Declare at top level to always be available
+
   try {
-    const { command, user_id, enableNLU, confidenceThreshold, slotOverrides } = req.body;
+    const { command, enableNLU, confidenceThreshold, slotOverrides } = req.body;
 
     if (!command || typeof command !== 'string') {
       return jsonError(res, 400, 'BAD_REQUEST', 'Command is required and must be a string');
     }
 
-    const uid = resolveUserId(user_id);
-    if (!uid.ok) {
+    // ✅ Enhanced user ID resolution with proper header support
+    const userId = resolveUserId(req);
+    if (!userId) {
       return jsonError(
         res,
         400,
         'MISSING_USER_ID',
-        'Provide "user_id" in the request body or set TEST_USER_ID in your .env.'
+        'Provide user ID via X-DCH-User-Id header, request body user_id, or set TEST_USER_ID in .env'
       );
     }
-    const userId = uid.userId;
 
-    // Key from header (preferred) or environment.
-    // Accept both X-HF-API-Key: hf_xxx and Authorization: Bearer hf_xxx.
-    let hfApiKey: string | null =
-      (req.get("X-HF-API-Key") || req.get("x-hf-api-key")) || null;
-    const auth = req.get("Authorization") || req.get("authorization");
-    if (!hfApiKey && auth && /^Bearer\s+hf_[A-Za-z0-9]+/.test(auth)) {
-      hfApiKey = auth.replace(/^Bearer\s+/i, "").trim();
+    console.log('[API] Using userId:', userId.slice(0, 8) + '...');
+
+    // ✅ Ensure user exists before creating job
+    const userResult = await ensureUser(userId, req.get('X-DCH-User-Name'));
+    if (!userResult.success) {
+      console.warn('[API] ensureUser failed (ignored for Day 8):', userResult.error);
     }
-    if (!hfApiKey && process.env.HF_API_KEY) {
-      hfApiKey = process.env.HF_API_KEY;
-    }
+
+    // ✅ Extract HF API key using helper function
+    const hfApiKey = extractHfApiKey(req);
 
     // Decide NLU usage + threshold
     const nluOn = typeof enableNLU === "boolean" ? enableNLU : true;
@@ -365,7 +406,6 @@ app.post('/api/commands', async (req, res) => {
         ? confidenceThreshold
         : Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7);
 
-    // ✅ ADD DEBUG LOGGING to see what we're actually using
     console.log('[NLU]', {
       headerKey: Boolean(req.get('X-HF-API-Key') || req.get('Authorization')),
       envKey: Boolean(process.env.HF_API_KEY),
@@ -374,8 +414,8 @@ app.post('/api/commands', async (req, res) => {
       nluEnabled: nluOn,
     });
 
-    // Parse (HF with graceful fallback lives inside parseWithNLU)
-    const parsedIntent = nluOn
+    // ✅ Parse and store in variable at function scope
+    parsedIntent = nluOn
       ? await parseWithNLU({ command, hfApiKey, confidenceThreshold: thresh })
       : regexOnly(command);
 
@@ -384,12 +424,15 @@ app.post('/api/commands', async (req, res) => {
     const overrides = slotOverrides || {};
     if (overrides.service) {intent.service = String(overrides.service);}
     if (overrides.environment) {intent.environment = String(overrides.environment);}
-    if (overrides.replicas !== null) {intent.replicas = Number(overrides.replicas);}
+    if (overrides.replicas !== null) { intent.replicas = Number(overrides.replicas); }
+
+    // Update parsedIntent to reflect overrides for response
+    parsedIntent = intent;
 
     // Validate required slots
     const { ok, missing } = validateIntent(intent);
     if (!ok) {
-      // Don't create a job yet — ask the client to fill the missing slot(s)
+      // ✅ Return parsed_intent even on 422 slot-filling responses
       return res.status(422).json({
         success: false,
         code: 'MISSING_SLOT',
@@ -397,7 +440,7 @@ app.post('/api/commands', async (req, res) => {
           ? 'Which service should I roll back?'
           : `Missing required field(s): ${missing.join(', ')}`,
         missing,
-        parsed_intent: intent,
+        parsed_intent: parsedIntent, // ✅ Always include
       });
     }
 
@@ -405,7 +448,7 @@ app.post('/api/commands', async (req, res) => {
     const validation = commandParser.validateIntent(intent);
     if (!validation.valid) {
       return jsonError(res, 400, 'VALIDATION_ERROR', validation.error || 'Invalid intent', {
-        parsed_intent: intent,
+        parsed_intent: parsedIntent, // ✅ Always include
       });
     }
 
@@ -418,8 +461,10 @@ app.post('/api/commands', async (req, res) => {
     });
 
     if (createRes.error || !createRes.data) {
+      console.error('Error creating job:', createRes.error);
       return jsonError(res, 500, 'INSERT_FAILED', 'Failed to create job', {
         db_error: createRes.error,
+        parsed_intent: parsedIntent, // ✅ Always include even on errors
       });
     }
 
@@ -433,17 +478,21 @@ app.post('/api/commands', async (req, res) => {
       intent.environment ?? undefined
     );
 
+    // ✅ Always return parsed_intent in successful response
     return res.status(201).json({
       success: true,
       job_id: job.id,
-      parsed_intent: intent,
+      parsed_intent: parsedIntent, // ✅ Always include
       status: job.status,
       created_at: job.created_at,
     });
 
   } catch (error: any) {
     console.error('Error processing command:', error);
-    return jsonError(res, 500, 'INTERNAL_ERROR', error?.message || 'Internal server error');
+    // ✅ Include parsed_intent even in error responses if available
+    return jsonError(res, 500, 'INTERNAL_ERROR', error?.message || 'Internal server error', {
+      ...(parsedIntent ? { parsed_intent: parsedIntent } : {}),
+    });
   }
 });
 
@@ -479,22 +528,22 @@ app.get('/api/jobs/:id', async (req, res) => {
   }
 });
 
-// ---------- GET /api/jobs ----------
+// ✅ FIXED: GET /api/jobs with proper user resolution
 app.get('/api/jobs', async (req, res) => {
   try {
-    const { user_id, status, limit } = req.query;
+    const { status, limit } = req.query;
     const lim = limit ? Math.min(parseInt(limit as string, 10) || 50, 100) : 50;
 
-    const uid = resolveUserId(user_id, false);
-    if (!uid.ok) {
+    // ✅ Get user_id using consistent resolution logic
+    const userId = resolveUserId(req);
+    if (!userId) {
       return jsonError(
         res,
         400,
         'MISSING_USER_ID',
-        'Provide "user_id" as a query param or set TEST_USER_ID in your .env.'
+        'Provide user ID via X-DCH-User-Id header, query param user_id, or set TEST_USER_ID in .env'
       );
     }
-    const userId = uid.userId;
 
     const jobs = await supabaseService.getUserJobs(userId, lim);
     const filtered = status ? jobs.filter((j: any) => j.status === status) : jobs;
