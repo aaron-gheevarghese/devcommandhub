@@ -47,6 +47,25 @@ function jsonError(
   return res.status(status).json({ success: false, code, message, ...(extra || {}) });
 }
 
+// Infer action from raw text
+function inferAction(command: string): 'deploy'|'scale'|'logs'|'restart'|'rollback'|'status'|null {
+  const c = (command || '').toLowerCase();
+  if (/\b(rollback|roll\s*back|revert)\b/.test(c)) {return 'rollback';}
+  if (/\b(restart|reboot|bounce)\b/.test(c)) {return 'restart';}
+  if (/\b(scale|autoscal(e|ing)|replicas?)\b/.test(c)) {return 'scale';}
+  if (/\b(logs?|tail|stream)\b/.test(c)) {return 'logs';}
+  if (/\b(status|health|uptime|state|ping|info)\b/.test(c)) {return 'status';}
+  if (/\b(deploy|release|ship|push)\b/.test(c)) {return 'deploy';}
+  return null;
+}
+
+function normalizeEnv(e?: string|null) {
+  if (!e) {return e;}
+  const m = { prod:'production', production:'production', staging:'staging', stage:'staging', dev:'development', development:'development', test:'test', qa:'qa' } as const;
+  const k = e.toLowerCase();
+  return (m as any)[k] || e;
+}
+
 // ✅ Enhanced user ID resolution with header support
 function resolveUserId(req: express.Request, allowMissing = false): string | null {
   // Priority order: header → body → query → environment → null
@@ -99,6 +118,41 @@ function extractHfApiKey(req: express.Request): string | null {
     hfApiKey = process.env.HF_API_KEY;
   }
   return hfApiKey;
+}
+
+// ✅ Server-side client hints (simple heuristics)
+// If you already have a shared util, you can replace this with `import { parseClientHints } from './services/clientHints'`
+function parseClientHints(command: string): { environment?: string; service?: string; replicas?: number } {
+  const c = (command || '').toLowerCase();
+
+  // environment
+  let environment: string | undefined;
+  if (/\b(prod|production)\b/.test(c)) {environment = 'production';}
+  else if (/\b(staging)\b/.test(c)) {environment = 'staging';}
+  else if (/\b(dev|development)\b/.test(c)) {environment = 'development';}
+  else if (/\b(test)\b/.test(c)) {environment = 'test';}
+  else if (/\bqa\b/.test(c)) {environment = 'qa';}
+
+  // replicas (prefer explicit "replicas" phrases, then scale ... to N)
+  let replicas: number | undefined;
+  const m1 = c.match(/\breplicas?\b[^0-9]*?(\d{1,3})/);
+  const m2 = c.match(/\bscale\b\s+\S+\s+\bto\b\s+(\d{1,3})\b/);
+  const m3 = c.match(/\bto\s+(\d{1,3})\b\s*(?:replicas?|pods?)?/); // fallback
+  const repRaw = (m1?.[1] ?? m2?.[1] ?? m3?.[1]);
+  if (repRaw) {
+    const n = parseInt(repRaw, 10);
+    if (!Number.isNaN(n)) {replicas = n;}
+  }
+
+  // service (very light heuristics)
+  // capture common "for X" / "of X" / direct tokens like user-service, auth-service, frontend, backend, api
+  let service: string | undefined;
+  const s1 = c.match(/\b(?:for|of)\s+([a-z0-9._-]+(?:-service)?)\b/);
+  const s2 = c.match(/\b([a-z0-9._-]+-service)\b/);
+  const s3 = c.match(/\b(frontend|backend|api|gateway|database-service|notification-service|payment-service|user-service|auth-service)\b/);
+  service = (s1?.[1] ?? s2?.[1] ?? s3?.[1]) as string | undefined;
+
+  return { environment, service, replicas };
 }
 
 // ---------- job simulation ----------
@@ -414,19 +468,35 @@ app.post('/api/commands', async (req, res) => {
       nluEnabled: nluOn,
     });
 
-    // ✅ Parse and store in variable at function scope
+    // 🔎 NEW: client hints + merge precedence
+    const clientHints = parseClientHints(command);
+    console.log('[API] Client hints:', clientHints);
+
+    // Parse with NLU/regex
     parsedIntent = nluOn
       ? await parseWithNLU({ command, hfApiKey, confidenceThreshold: thresh })
       : regexOnly(command);
 
-    // Apply slot overrides
-    const intent = { ...parsedIntent };
-    const overrides = slotOverrides || {};
-    if (overrides.service) {intent.service = String(overrides.service);}
-    if (overrides.environment) {intent.environment = String(overrides.environment);}
-    if (overrides.replicas !== null) { intent.replicas = Number(overrides.replicas); }
+    console.log('[API] Initial parsed intent:', parsedIntent);
 
-    // Update parsedIntent to reflect overrides for response
+    // Merge client hints with parsed intent (client hints fill gaps, replicas takes numeric precedence)
+    const mergedIntent = {
+      ...parsedIntent,
+      ...(clientHints.environment && !parsedIntent.environment ? { environment: clientHints.environment } : {}),
+      ...(clientHints.service && !parsedIntent.service ? { service: clientHints.service } : {}),
+      ...(typeof clientHints.replicas === 'number' ? { replicas: clientHints.replicas } : {}),
+    };
+
+    // Apply explicit slot overrides (highest precedence)
+    const intent: any = { ...mergedIntent };
+    const overrides = slotOverrides || {};
+    if (overrides.service) { intent.service = String(overrides.service); }
+    if (overrides.environment) { intent.environment = String(overrides.environment); }
+    if (typeof overrides.replicas === 'number') { intent.replicas = Number(overrides.replicas); }
+
+    console.log('[API] Final intent after merging:', intent);
+
+    // Update parsedIntent to reflect all merging for response
     parsedIntent = intent;
 
     // Validate required slots

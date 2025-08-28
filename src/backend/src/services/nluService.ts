@@ -20,45 +20,116 @@ export type ParsedIntent = {
 
 export function regexParse(command: string): ParsedIntent {
   const c = command.toLowerCase();
-  const envMatch = /(prod|production|staging|stage|dev|development|local)\b/.exec(c);
-  const serviceMatch = /\b(api|backend|server|web(app)?|frontend|db|database|worker)\b/.exec(c);
-  const replicasMatch = /(\d+)\s*(replica|replicas|pods?)/.exec(c);
-  const action: ParsedIntent["action"] =
-    /rollback/.test(c) ? "rollback" :
-    /scale|replica|autoscal/.test(c) ? "scale" :
-    /restart|reboot/.test(c) ? "restart" :
-    /log/.test(c) ? "logs" :
-    /status|health|ping/.test(c) ? "status" :
-    /deploy|release|ship/.test(c) ? "deploy" : "unknown";
-
+  
+  // More comprehensive environment matching
+  const envPatterns = [
+    /\b(?:to|in|on|for)\s+(prod|production|staging|stage|dev|development|local|test|testing|qa|uat)\b/,
+    /\b(prod|production|staging|stage|dev|development|local|test|testing|qa|uat)\s+(?:env|environment)\b/,
+    /\benv(?:ironment)?[:=]\s*(prod|production|staging|stage|dev|development|local|test|testing|qa|uat)\b/
+  ];
+  
+  let environment: string | null = null; // ✅ Fix: Explicit type annotation
+  for (const pattern of envPatterns) {
+    const match = c.match(pattern);
+    if (match?.[1]) {
+      environment = match[1];
+      break;
+    }
+  }
+  
+  // More comprehensive service matching
+  const servicePatterns = [
+    // Specific service patterns first (more precise)
+    /\b(api|backend|server|web|webapp|frontend|db|database|worker|auth|user|payment|notification|gateway|proxy)-?(?:service|svc|app)?\b/,
+    // Generic service-name patterns
+    /\b([a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*)-(?:service|svc|app)\b/,
+    // Fallback to any reasonable service name
+    /\b([a-zA-Z][a-zA-Z0-9._-]{1,30})\b(?=\s+(?:to|in|on|for|$))/
+  ];
+  
+  let service: string | null = null; // ✅ Fix: Explicit type annotation
+  for (const pattern of servicePatterns) {
+    const match = c.match(pattern);
+    if (match?.[1]) {
+      // Skip common words that aren't services
+      const word = match[1].toLowerCase();
+      if (!['the', 'and', 'or', 'but', 'to', 'in', 'on', 'for', 'show', 'get', 'set'].includes(word)) {
+        service = match[1];
+        break;
+      }
+    }
+  }
+  
+  // Enhanced replicas matching
+  const replicaPatterns = [
+    /(\d+)\s*(?:replica|replicas|pods?|instances?)\b/,
+    /\bto\s+(\d+)\s*(?:replica|replicas|pods?|instances?)?\b/,
+    /\breplica(?:s|count)?[:=]\s*(\d+)\b/,
+    /\bscale\b[^\d]*(\d+)\b/
+  ];
+  
+  let replicas: number | undefined = undefined; // ✅ Fix: Explicit type annotation
+  for (const pattern of replicaPatterns) {
+    const match = c.match(pattern);
+    if (match?.[1]) {
+      const num = Number(match[1]);
+      if (num >= 0 && num <= 100) {
+        replicas = num;
+        break;
+      }
+    }
+  }
+  
+  // Enhanced action detection with better precedence
+  const actionPatterns = [
+    { pattern: /\b(?:roll\s*back|rollback)\b/, action: 'rollback' as const },
+    { pattern: /\bscale\b|\breplica\b|\bautoscal\b/, action: 'scale' as const },
+    { pattern: /\brestart\b|\breboot\b|\breload\b/, action: 'restart' as const },
+    { pattern: /\blog\b|\blogs\b|\btail\b/, action: 'logs' as const },
+    { pattern: /\bstatus\b|\bhealth\b|\bping\b|\bcheck\b/, action: 'status' as const },
+    { pattern: /\bdeploy\b|\brelease\b|\bship\b|\bpush\b/, action: 'deploy' as const }
+  ];
+  
+  let action: ParsedIntent["action"] = "unknown";
+  for (const { pattern, action: act } of actionPatterns) {
+    if (pattern.test(c)) {
+      action = act;
+      break;
+    }
+  }
+  
   return {
     action,
-    environment: envMatch?.[1] ?? null,
-    service: serviceMatch?.[0] ?? null,
-    replicas: replicasMatch ? Number(replicasMatch[1]) : undefined,
+    environment,
+    service,
+    replicas,
     confidence: 0.5,
     source: "regex",
   };
 }
 
+
 const ACTIONS = ["deploy","rollback","scale","restart","logs","status"] as const;
 
+// Replace the ACTION_HYPOTHESES in your nluService.ts with these more specific ones:
+
 const ACTION_HYPOTHESES = [
-  { action: "deploy",   hypothesis: "The user wants to deploy a service." },
-  { action: "rollback", hypothesis: "The user wants to roll back a deployment." },
-  { action: "scale",    hypothesis: "The user wants to scale the number of replicas." },
-  { action: "restart",  hypothesis: "The user wants to restart a service or pod." },
-  { action: "logs",     hypothesis: "The user wants to view logs." },
-  { action: "status",   hypothesis: "The user wants to check the status or health of services." },
+  { action: "deploy",   hypothesis: "This is a request to deploy, ship, release, or push code to a service or environment." },
+  { action: "rollback", hypothesis: "This is a request to roll back, revert, or undo a previous deployment." },
+  { action: "scale",    hypothesis: "This is a request to scale, resize, or change the number of replicas or instances." },
+  { action: "restart",  hypothesis: "This is a request to restart, reboot, or reload a service or application." },
+  { action: "logs",     hypothesis: "This is a request to view, show, or tail logs from a service or application." },
+  { action: "status",   hypothesis: "This is a request to check the status, health, or state of a service or system." },
 ] as const;
 
+// Also update the ZERO_SHOT_LABELS to be more specific:
 const ZERO_SHOT_LABELS = [
-  { action: "deploy",   label: "deploy a service" },
-  { action: "rollback", label: "roll back a deployment" },
-  { action: "scale",    label: "scale replicas" },
-  { action: "restart",  label: "restart a service" },
-  { action: "logs",     label: "view logs" },
-  { action: "status",   label: "check status" },
+  { action: "deploy",   label: "deploy or release code" },
+  { action: "rollback", label: "rollback or revert deployment" },
+  { action: "scale",    label: "scale or resize service" },
+  { action: "restart",  label: "restart or reboot service" },
+  { action: "logs",     label: "view or show logs" },
+  { action: "status",   label: "check status or health" },
 ] as const;
 
 function isZeroShotModel(model: string) {

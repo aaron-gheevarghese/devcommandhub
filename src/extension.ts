@@ -3,7 +3,6 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 
-
 // ---- User & API types ----
 interface VSCodeUser {
   username: string;
@@ -52,15 +51,65 @@ const API_ENVIRONMENTS: ApiEnvironment[] = [
 ];
 
 /** ---------- Small helper: parse client-side hints from free text ---------- */
-function parseClientHints(command: string): Record<string, any> {
-  const txt = (command || '').toLowerCase();
-  // Try to infer replicas: "scale backend to 5 replicas", "replicas=4", "scale 3"
-  const m1 = txt.match(/\b(?:to|=)\s*(\d+)\s*(?:replicas?|pods?)\b/);
-  const m2 = txt.match(/\bscale\b[^\d]*(\d+)\b/);
-  const n = m1?.[1] || m2?.[1];
-  const hints: any = {};
-  if (n) { hints.replicas = Number(n); }
-  return hints;
+
+// Safer client hints — avoids treating verbs/envs as services
+function parseClientHints(command: string): { environment?: string; service?: string; replicas?: number } {
+  const c = (command || '').toLowerCase().trim();
+
+  // normalize environment tokens
+  const envMap: Record<string, string> = {
+    prod: 'production',
+    production: 'production',
+    stage: 'staging',
+    staging: 'staging',
+    dev: 'development',
+    development: 'development',
+    test: 'test',
+    qa: 'qa',
+  };
+  let environment: string | undefined;
+  for (const token of Object.keys(envMap)) {
+    if (new RegExp(`\\b${token}\\b`, 'i').test(c)) {
+      environment = envMap[token];
+      break;
+    }
+  }
+
+  // replicas
+  let replicas: number | undefined;
+  const m1 = c.match(/\breplicas?\b[^0-9]*?(\d{1,3})/);
+  const m2 = c.match(/\bscale\b\s+\S+\s+\bto\b\s+(\d{1,3})\b/);
+  const m3 = c.match(/\bto\s+(\d{1,3})\b\s*(?:replicas?|pods?)?\b/);
+  const repRaw = (m1?.[1] ?? m2?.[1] ?? m3?.[1]);
+  if (repRaw) {
+    const n = parseInt(repRaw, 10);
+    if (!Number.isNaN(n)) {replicas = n;}
+  }
+
+  // service — exclude action verbs and env terms
+  const STOP = new Set([
+    'deploy','status','scale','restart','rollback','logs',
+    'production','prod','staging','stage','development','dev','test','qa'
+  ]);
+
+  // candidates like "<name>-service", or common names
+  const svcPatterns: RegExp[] = [
+    /\b([a-z0-9._-]+-service)\b/,
+    /\b(frontend|backend|api|gateway|user-service|auth-service|database-service|notification-service|payment-service)\b/,
+    /\b(?:for|of)\s+([a-z0-9._-]+(?:-service)?)\b/,
+  ];
+
+  let service: string | undefined;
+  for (const re of svcPatterns) {
+    const m = c.match(re);
+    const cand = m?.[1];
+    if (cand && !STOP.has(cand)) {
+      service = cand;
+      break;
+    }
+  }
+
+  return { environment, service, replicas };
 }
 
 // ---- Provider ----
@@ -76,12 +125,11 @@ class DevCommandHubProvider implements vscode.Disposable {
   constructor(private context: vscode.ExtensionContext) {
     this.initializeUser();
 
-    // NEW: react to settings changes without reload (useful while testing)
+    // react to settings changes without reload
     this.context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('devcommandhub')) {
           if (this.panel) {
-            // Light ping so the webview could update banners later if needed
             this.panel.webview.postMessage({ command: 'settingsChanged' });
           }
         }
@@ -133,23 +181,22 @@ class DevCommandHubProvider implements vscode.Disposable {
   }
 
   private isUuid(s?: string): boolean {
-  return !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
-}
+    return !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  }
 
-private getStableUserId(): string {
-  // 1) prefer a valid UUID from settings (if set)
-  const cfgId = vscode.workspace.getConfiguration('devcommandhub').get<string>('userId', '')?.trim();
-  if (this.isUuid(cfgId)) {return cfgId!;}
+  private getStableUserId(): string {
+    // 1) prefer a valid UUID from settings (if set)
+    const cfgId = vscode.workspace.getConfiguration('devcommandhub').get<string>('userId', '')?.trim();
+    if (this.isUuid(cfgId)) {return cfgId!;}
 
-  // 2) otherwise cache one in globalState
-  let cached = this.context.globalState.get<string>('dch.userId');
-  if (this.isUuid(cached)) {return cached!;}
+    // 2) otherwise cache one in globalState
+    let cached = this.context.globalState.get<string>('dch.userId');
+    if (this.isUuid(cached)) {return cached!;}
 
-  cached = randomUUID();
-  this.context.globalState.update('dch.userId', cached);
-  return cached;
-}
-
+    cached = randomUUID();
+    this.context.globalState.update('dch.userId', cached);
+    return cached;
+  }
 
   private getUserAvatarText(): string {
     if (!this.currentUser) { return 'D'; }
@@ -166,7 +213,7 @@ private getStableUserId(): string {
     return vscode.workspace.getConfiguration('devcommandhub').get('apiBaseUrl', 'http://localhost:3001');
   }
 
-  // NEW: read current NLU settings
+  // read current NLU settings
   private getNluSettings(): { enableNLU: boolean; confidenceThreshold: number; userId?: string } {
     const cfg = vscode.workspace.getConfiguration('devcommandhub');
     const enableNLU = cfg.get<boolean>('enableNLU', true);
@@ -345,6 +392,68 @@ private getStableUserId(): string {
     });
   }
 
+  // Handle API error responses with user-friendly dialogs
+  private async handleApiError(res: Response, data: any, command: string): Promise<any> {
+    if (res.status === 422) {
+      if (data?.code === 'LOW_CONFIDENCE' && data?.suggested_action) {
+        const choice = await vscode.window.showWarningMessage(
+          data.message,
+          `Use "${data.suggested_action}"`,
+          'Try different command',
+          'Cancel'
+        );
+
+        if (choice === `Use "${data.suggested_action}"`) {
+          const retryBody = {
+            command,
+            enableNLU: true,
+            clientHints: parseClientHints(command),
+            user_id: this.getStableUserId(),
+            slotOverrides: { action: data.suggested_action }
+          };
+
+          const retryRes = await fetch(`${this.getApiBaseUrl()}/api/commands`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...this.getHFHeaders() },
+            body: JSON.stringify(retryBody),
+          });
+
+          if (!retryRes.ok) {
+            const retryData = await retryRes.json().catch(() => ({}));
+            throw new Error(`Retry failed: ${retryRes.status} — ${JSON.stringify(retryData)}`);
+          }
+
+          return retryRes.json();
+        } else {
+          throw new Error('Command unclear - please try a different command');
+        }
+      }
+
+      if (data?.code === 'UNCLEAR_COMMAND' && data?.examples) {
+        const choice = await vscode.window.showWarningMessage(
+          data.message,
+          'Show examples',
+          'Cancel'
+        );
+
+        if (choice === 'Show examples') {
+          const example = await vscode.window.showQuickPick(
+            data.examples.map((ex: string) => ({ label: ex })),
+            { placeHolder: 'Try one of these examples:' }
+          );
+
+          if (example) {
+            return this.sendCommandToAPI(example);
+          }
+        }
+
+        throw new Error('Command unclear - please try again with a clearer command');
+      }
+    }
+
+    throw new Error(`API request failed: ${res.status} ${res.statusText} — ${JSON.stringify(data)}`);
+  }
+
   private async startJobPolling(jobId: string, maxAttempts: number = 60) {
     if (this.pollingJobs.has(jobId)) {
       console.log(`[DCH] Already polling job ${jobId}`);
@@ -460,88 +569,285 @@ private getStableUserId(): string {
 
   // ---------- API calls ----------
   private getHFHeaders(): Record<string, string> {
-    // Read from settings: devcommandhub.hfToken (string)
     const token = vscode.workspace.getConfiguration('devcommandhub')
       .get<string>('hfToken', '')?.trim();
     return token ? { 'X-HF-API-Key': token } : {};
   }
 
-  p;// ---------- API calls ----------
-// ---------- API calls ----------
-// Updated sendCommandToAPI method
-private async sendCommandToAPI(command: string, opts?: { slotOverrides?: Record<string, any> }): Promise<any> {
-  const { enableNLU, confidenceThreshold, userId } = this.getNluSettings();
-  const apiBase = this.getApiBaseUrl();
-  const validUUID = (s: string) =>
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
-  
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  
-  // Add user ID header if valid UUID
-  if (userId && validUUID(userId)) {
-    headers['X-DCH-User-Id'] = userId;   // header for server side convenience
-  }
+  // Updated sendCommandToAPI method with comprehensive slot filling, incl. 'action'
+  private async sendCommandToAPI(
+    command: string,
+    opts?: { slotOverrides?: Record<string, any> }
+  ): Promise<any> {
+    const { enableNLU, confidenceThreshold, userId } = this.getNluSettings();
+    const apiBase = this.getApiBaseUrl();
 
-  // client-side hints (replicas, etc.)
-  const clientHints = parseClientHints(command);
+    const validUUID = (s: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 
-  // build body with user_id if valid UUID
-  const body: any = {
-    command,
-    enableNLU,
-    clientHints,
-    ...(typeof confidenceThreshold === 'number' ? { confidenceThreshold } : {}),
-    ...(userId && validUUID(userId) ? { user_id: userId } : { user_id: this.getStableUserId() })
-  };
-  
-  if (opts?.slotOverrides) {
-    body.slotOverrides = opts.slotOverrides;
-  }
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
-  const res = await fetch(`${apiBase}/api/commands`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  const data = await res.json().catch(() => ({} as any));
-
-  if (!res.ok) {
-    // slot-filling (e.g. rollback missing service)
-    if (res.status === 422 && (data as any)?.code === 'MISSING_SLOT' && Array.isArray((data as any).missing)) {
-      if ((data as any).missing.includes('service')) {
-        const cfg = vscode.workspace.getConfiguration('devcommandhub');
-        const known = cfg.get<string[]>('services', ['frontend','api','backend','auth-service','user-service','database-service']);
-        const picked = await vscode.window.showQuickPick(known.map(label => ({ label })), {
-          placeHolder: (data as any)?.message ?? 'Pick a service',
-        });
-        const service = picked?.label || await vscode.window.showInputBox({
-          prompt: (data as any)?.message ?? 'Which service?',
-          placeHolder: 'e.g. auth-service',
-        });
-        if (!service) {throw new Error('User cancelled slot fill');}
-
-        const retryBody = { ...body, slotOverrides: { ...(body.slotOverrides || {}), service } };
-        const retryRes = await fetch(`${apiBase}/api/commands`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(retryBody),
-        });
-        if (!retryRes.ok) {
-          const err = await retryRes.text();
-          throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
-        }
-        return retryRes.json();
-      }
+    // Add user ID header if valid UUID
+    if (userId && validUUID(userId)) {
+      headers['X-DCH-User-Id'] = userId;
     }
 
-    throw new Error(`API request failed: ${res.status} ${res.statusText} — ${JSON.stringify(data)}`);
+    // Add HF headers from settings
+    Object.assign(headers, this.getHFHeaders());
+
+    // client-side hints (replicas, etc.)
+    const clientHints = parseClientHints(command);
+
+    // Build body (prefer provided userId, fall back to stable)
+    const body: any = {
+      command,
+      enableNLU,
+      clientHints,
+      ...(typeof confidenceThreshold === 'number' ? { confidenceThreshold } : {}),
+      ...(userId && validUUID(userId) ? { user_id: userId } : { user_id: this.getStableUserId() }),
+    };
+
+    if (opts?.slotOverrides) {
+      body.slotOverrides = opts.slotOverrides;
+    }
+
+    const res = await fetch(`${apiBase}/api/commands`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    const data: any = await res.json().catch(() => ({} as any));
+
+    if (!res.ok) {
+      // ---- Slot filling flow (422 MISSING_SLOT) ----
+      if (res.status === 422 && data?.code === 'MISSING_SLOT' && Array.isArray(data?.missing)) {
+        const missingSlots: string[] = data.missing || [];
+        const intent = data?.parsed_intent || {};
+        const actionTitle = intent?.action ?? 'action';
+
+        // --- ACTION slot ---
+        if (missingSlots.includes('action')) {
+          const actions = [
+            { label: 'deploy', description: 'Deploy a service' },
+            { label: 'scale', description: 'Scale replicas' },
+            { label: 'logs', description: 'View recent logs' },
+            { label: 'restart', description: 'Restart a service' },
+            { label: 'rollback', description: 'Rollback to previous version' },
+            { label: 'status', description: 'Check service status/health' },
+          ];
+
+          const picked = await vscode.window.showQuickPick(actions, {
+            placeHolder: data?.message ?? 'What do you want to do?',
+            title: 'Select Action',
+          });
+
+          const action =
+            picked?.label ||
+            (await vscode.window.showInputBox({
+              prompt: data?.message ?? 'Action?',
+              placeHolder: 'deploy | scale | logs | restart | rollback | status',
+              validateInput: (value) => {
+                if (!value?.trim()) { return 'Action cannot be empty'; }
+                const ok = /^(deploy|scale|logs|restart|rollback|status)$/i.test(value.trim());
+                return ok ? null : 'Must be one of: deploy, scale, logs, restart, rollback, status';
+              },
+            }));
+
+          if (!action) {
+            throw new Error('User cancelled slot filling');
+          }
+
+          const retryBody = {
+            ...body,
+            slotOverrides: { ...(body.slotOverrides || {}), action: String(action).toLowerCase() },
+          };
+
+          const retryRes = await fetch(`${apiBase}/api/commands`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(retryBody),
+          });
+
+          if (!retryRes.ok) {
+            const err = await retryRes.text();
+            throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
+          }
+
+          return retryRes.json();
+        }
+
+        // --- SERVICE slot ---
+        if (missingSlots.includes('service')) {
+          const cfg = vscode.workspace.getConfiguration('devcommandhub');
+          const knownServices = cfg.get<string[]>('services', [
+            'frontend',
+            'api',
+            'backend',
+            'auth-service',
+            'user-service',
+            'database-service',
+            'gateway',
+            'notification-service',
+            'payment-service',
+          ]);
+
+          // Smart suggestions from command text
+          const commandLower = command.toLowerCase();
+          const words = commandLower.split(/\s+/);
+          const firstLongWord = words.find((w) => w.length > 2) || '';
+
+          const suggestions = knownServices.filter(
+            (svc) =>
+              commandLower.includes(svc.toLowerCase()) ||
+              svc.toLowerCase().includes(firstLongWord)
+          );
+
+          const quickPickItems = [
+            ...suggestions.map((svc) => ({
+              label: svc,
+              description: '(suggested based on your command)',
+            })),
+            ...knownServices
+              .filter((svc) => !suggestions.includes(svc))
+              .map((svc) => ({ label: svc })),
+          ];
+
+          const picked = await vscode.window.showQuickPick(quickPickItems, {
+            placeHolder: data?.message ?? 'Which service?',
+            title: `${actionTitle} - Select Service`,
+          });
+
+          const service =
+            picked?.label ||
+            (await vscode.window.showInputBox({
+              prompt: data?.message ?? 'Which service?',
+              placeHolder: 'e.g. auth-service',
+              validateInput: (value) => {
+                if (!value?.trim()) {return 'Service name cannot be empty';}
+                if (!/^[a-zA-Z0-9._-]+$/.test(value))
+                  {return 'Service name can only contain letters, numbers, dots, underscores, and hyphens';}
+                return null;
+              },
+            }));
+
+          if (!service) {
+            throw new Error('User cancelled slot filling');
+          }
+
+          const retryBody = {
+            ...body,
+            slotOverrides: { ...(body.slotOverrides || {}), service },
+          };
+
+          const retryRes = await fetch(`${apiBase}/api/commands`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(retryBody),
+          });
+
+          if (!retryRes.ok) {
+            const err = await retryRes.text();
+            throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
+          }
+
+          return retryRes.json();
+        }
+
+        // --- REPLICAS slot ---
+        if (missingSlots.includes('replicas')) {
+          const replicaCount = await vscode.window.showInputBox({
+            prompt: 'How many replicas?',
+            placeHolder: 'e.g. 3',
+            validateInput: (value) => {
+              if (!value?.trim()) {return 'Replica count cannot be empty';}
+              const num = parseInt(value, 10);
+              if (isNaN(num) || num < 0 || num > 100)
+                {return 'Replica count must be between 0 and 100';}
+              return null;
+            },
+          });
+
+          if (!replicaCount) {
+            throw new Error('User cancelled slot filling');
+          }
+
+          const retryBody = {
+            ...body,
+            slotOverrides: {
+              ...(body.slotOverrides || {}),
+              replicas: parseInt(replicaCount, 10),
+            },
+          };
+
+          const retryRes = await fetch(`${apiBase}/api/commands`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(retryBody),
+          });
+
+          if (!retryRes.ok) {
+            const err = await retryRes.text();
+            throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
+          }
+
+          return retryRes.json();
+        }
+
+        // --- ENVIRONMENT slot ---
+        if (missingSlots.includes('environment')) {
+          const environments = ['development', 'staging', 'production', 'test', 'qa'];
+
+          const picked = await vscode.window.showQuickPick(
+            environments.map((env) => ({ label: env })),
+            {
+              placeHolder: 'Which environment?',
+              title: `${actionTitle} - Select Environment`,
+            }
+          );
+
+          const environment =
+            picked?.label ||
+            (await vscode.window.showInputBox({
+              prompt: 'Which environment?',
+              placeHolder: 'e.g. staging',
+              validateInput: (value) => {
+                if (!value?.trim()) {return 'Environment cannot be empty';}
+                return null;
+              },
+            }));
+
+          if (!environment) {
+            throw new Error('User cancelled slot filling');
+          }
+
+          const retryBody = {
+            ...body,
+            slotOverrides: { ...(body.slotOverrides || {}), environment },
+          };
+
+          const retryRes = await fetch(`${apiBase}/api/commands`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(retryBody),
+          });
+
+          if (!retryRes.ok) {
+            const err = await retryRes.text();
+            throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
+          }
+
+          return retryRes.json();
+        }
+      }
+
+      // Use handleApiError for other error cases
+      return await this.handleApiError(res as any, data, command);
+    }
+
+    // Success
+    return data;
   }
-
-  return data;
-}
-
-
 
   private async getJobDetails(jobId: string): Promise<JobDetails> {
     const controller = new AbortController();
@@ -561,7 +867,7 @@ private async sendCommandToAPI(command: string, opts?: { slotOverrides?: Record<
 
   private getControllerScript(nonce: string): string {
     return `
-<script nonce="${nonce}">
+<script nonce="\${nonce}">
 (function () {
   window.onerror = function (msg, src, line, col, err) {
     console.error('[DCH] Webview error:', msg, src + ':' + line + ':' + col, err);
@@ -718,7 +1024,7 @@ private async sendCommandToAPI(command: string, opts?: { slotOverrides?: Record<
         document.body.appendChild(toast);
         setTimeout(function(){
           toast.style.animation='slideOut .3s ease-in forwards';
-          setTimeout(function(){ toast.remove(); }, 300);
+          setTimeout(function(){ toast.remove(); }, 1200);
         }, 1200);
         return;
       }
@@ -841,7 +1147,7 @@ private async sendCommandToAPI(command: string, opts?: { slotOverrides?: Record<
         (resp.parsed_intent && resp.parsed_intent.service ? '<strong>Service:</strong> ' + resp.parsed_intent.service + '<br>' : '') +
         (resp.parsed_intent && resp.parsed_intent.environment ? '<strong>Environment:</strong> ' + resp.parsed_intent.environment + '<br>' : '') +
         '<strong>Confidence:</strong> ' + conf + '<br>' +
-        '<strong>Parser:</strong> ' + sourceBadge + (source ? ' <span style="opacity:.6">(' + source + ')</span>' : '') + '<br>' + // NEW
+        '<strong>Parser:</strong> ' + sourceBadge + (source ? ' <span style="opacity:.6">(' + source + ')</span>' : '') + '<br>' +
         (resp.parsed_intent && typeof resp.parsed_intent.replicas !== 'undefined'
           ? '<strong>Replicas:</strong> ' + resp.parsed_intent.replicas + '<br>'
           : '') +
@@ -907,7 +1213,7 @@ private async sendCommandToAPI(command: string, opts?: { slotOverrides?: Record<
       content.appendChild(er);
     }
 
-    // ---- replicas mismatch banner (optional but helpful)
+    // ---- replicas mismatch banner
     var desired = (function(){
       var wanted = item.querySelector('.bot-message-content');
       if (!wanted) return null;

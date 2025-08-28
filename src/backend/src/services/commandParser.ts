@@ -29,11 +29,41 @@ const REQUIRED_SLOTS: Record<Action, Array<keyof ParsedIntent>> = {
   unknown:  [],
 };
 
-export function validateIntent(intent: ParsedIntent) {
+export function validateIntent(intent: ParsedIntent): { ok: boolean; missing: string[]; suggestions?: string[] } {
   const req = REQUIRED_SLOTS[intent.action as Action] || [];
   const missing = req.filter((slot) => !intent[slot] && intent[slot] !== 0);
-  return { ok: missing.length === 0, missing };
+  
+  // Add contextual suggestions based on the action and what's missing
+  const suggestions: string[] = [];
+  
+  if (intent.action === 'rollback' && missing.includes('service')) {
+    suggestions.push(
+      'Try: "rollback auth-service" or "rollback api"',
+      'Specify which service to roll back'
+    );
+  }
+  
+  if (intent.action === 'scale' && missing.includes('replicas')) {
+    suggestions.push(
+      'Try: "scale api-service to 3 replicas"',
+      'Specify how many replicas you want'
+    );
+  }
+  
+  if (intent.action === 'deploy' && missing.includes('service')) {
+    suggestions.push(
+      'Try: "deploy frontend to staging"',
+      'Specify which service to deploy'
+    );
+  }
+  
+  return { 
+    ok: missing.length === 0, 
+    missing,
+    ...(suggestions.length > 0 ? { suggestions } : {})
+  };
 }
+
 
 /** Normalize common environment aliases -> canonical names */
 function normalizeEnvironment(env?: string): string | undefined {
