@@ -574,26 +574,38 @@ class DevCommandHubProvider implements vscode.Disposable {
     return token ? { 'X-HF-API-Key': token } : {};
   }
 
-  // Updated sendCommandToAPI method with comprehensive slot filling, incl. 'action'
-  private async sendCommandToAPI(
-    command: string,
-    opts?: { slotOverrides?: Record<string, any> }
-  ): Promise<any> {
-    const { enableNLU, confidenceThreshold, userId } = this.getNluSettings();
-    const apiBase = this.getApiBaseUrl();
+  
+// Add this method to the DevCommandHubProvider class, after getHFHeaders():
 
-    const validUUID = (s: string) =>
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+private getGitHubHeaders(): Record<string, string> {
+  const token = vscode.workspace.getConfiguration('devcommandhub')
+    .get<string>('githubToken', '')?.trim();
+  return token ? { 'X-GitHub-Token': token } : {};
+}
 
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+// Update the sendCommandToAPI method to include GitHub headers:
+private async sendCommandToAPI(
+  command: string,
+  opts?: { slotOverrides?: Record<string, any> }
+): Promise<any> {
+  const { enableNLU, confidenceThreshold, userId } = this.getNluSettings();
+  const apiBase = this.getApiBaseUrl();
 
-    // Add user ID header if valid UUID
-    if (userId && validUUID(userId)) {
-      headers['X-DCH-User-Id'] = userId;
-    }
+  const validUUID = (s: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 
-    // Add HF headers from settings
-    Object.assign(headers, this.getHFHeaders());
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+  // Add user ID header if valid UUID
+  if (userId && validUUID(userId)) {
+    headers['X-DCH-User-Id'] = userId;
+  }
+
+  // Add HF headers from settings
+  Object.assign(headers, this.getHFHeaders());
+  
+  // NEW: Add GitHub headers from settings
+  Object.assign(headers, this.getGitHubHeaders());
 
     // client-side hints (replicas, etc.)
     const clientHints = parseClientHints(command);

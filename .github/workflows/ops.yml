@@ -1,0 +1,35 @@
+name: DevCommandHub Ops
+on:
+  workflow_dispatch:
+    inputs:
+      job_id: { description: "DCH Job ID", required: true }
+      action: { description: "deploy|rollback|scale|restart|logs|status", required: true }
+      service: { description: "service name", required: false }
+      environment: { description: "dev|staging|prod", required: false }
+      replicas: { description: "int", required: false }
+run-name: DCH ${{ inputs.job_id }} — ${{ inputs.action }} ${{ inputs.service }} @ ${{ inputs.environment }}
+jobs:
+  ops:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Echo inputs
+        run: |
+          echo "job_id=${{ inputs.job_id }}"
+          echo "action=${{ inputs.action }}"
+          echo "service=${{ inputs.service }}"
+          echo "environment=${{ inputs.environment }}"
+          echo "replicas=${{ inputs.replicas }}"
+      - name: Do action
+        run: |
+          set -eux
+          case "${{ inputs.action }}" in
+            deploy)   echo "Deploying ${{ inputs.service }} to ${{ inputs.environment }}";;
+            rollback) echo "Rolling back ${{ inputs.service }}";;
+            scale)    echo "Scaling ${{ inputs.service }} to ${{ inputs.replicas }}";;
+            restart)  echo "Restarting ${{ inputs.service }}";;
+            logs)     echo "Fetching logs for ${{ inputs.service }}";;
+            status)   echo "Checking status for ${{ inputs.service }}";;
+            *)        echo "Unknown action"; exit 1;;
+          esac
