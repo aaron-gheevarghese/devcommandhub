@@ -865,9 +865,11 @@ class DevCommandHubProvider implements vscode.Disposable {
     }
   }
 
-  private getControllerScript(nonce: string): string {
-    return `
-<script nonce="\${nonce}">
+  // Fixed getControllerScript method in DevCommandHubProvider class
+
+private getControllerScript(nonce: string): string {
+  return `
+<script nonce="${nonce}">
 (function () {
   window.onerror = function (msg, src, line, col, err) {
     console.error('[DCH] Webview error:', msg, src + ':' + line + ':' + col, err);
