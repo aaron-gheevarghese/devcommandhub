@@ -55,7 +55,13 @@
         "key": "ctrl+shift+alt+a",
         "mac": "cmd+shift+alt+a"
       }
-    ]
+    ],
+
+    "githubToken": {
+      "type": "string",
+      "default": "",
+      "description": "GitHub Personal Access Token for triggering workflows"
+    }
   },
   "scripts": {
     "clean": "rimraf out",
@@ -84,7 +90,6 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@octokit/rest": "^22.0.0",
     "@supabase/supabase-js": "^2.54.0",
     "@types/node-fetch": "^2.6.11",
     "cors": "^2.8.5",

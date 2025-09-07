@@ -1,4 +1,4 @@
-// src/backend/src/app.ts - Day 8 fixes for user_id handling and parsed_intent responses
+// src/backend/src/app.ts - Day 8 fixes for user_id handling and parsed_intent responses with GitHub Actions
 
 import express from 'express';
 import cors from 'cors';
@@ -12,14 +12,20 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 import { supabaseService, supabaseAdmin } from './services/supabase';
 import { commandParser, validateIntent } from './services/commandParser';
 import { parseCommand as parseWithNLU, regexParse as regexOnly } from './services/nluService';
+import { GitHubActionsService, mapGaToDchStatus } from './services/githubService';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const VERSION = process.env.npm_package_version || '1.0.0';
 const TEST_USER_ID = process.env.TEST_USER_ID;
 
+// GitHub Actions integration
+const GITHUB_WORKFLOW_FILE = process.env.GH_WORKFLOW_FILE || 'ops.yml';
+const USE_GITHUB_ACTIONS = process.env.USE_GITHUB_ACTIONS === 'true';
+
 // In-memory job tracking for lifecycle management
 const jobSimulations = new Map<string, NodeJS.Timeout>();
+const githubJobTracking = new Map<string, { runId: number; service: GitHubActionsService }>();
 
 // ---------- middleware ----------
 app.use(helmet());
@@ -120,8 +126,21 @@ function extractHfApiKey(req: express.Request): string | null {
   return hfApiKey;
 }
 
+// ✅ Updated GitHub token extraction with proper Bearer token support
+function extractGitHubApiKey(req: express.Request): string | null {
+  let gitHubApiKey: string | null = 
+    (req.get("X-GitHub-Token") || req.get("x-github-token")) || null;
+  const auth = req.get("Authorization") || req.get("authorization");
+  if (!gitHubApiKey && auth && /^Bearer\s+gh[a-z]_[A-Za-z0-9]+/.test(auth)) {
+    gitHubApiKey = auth.replace(/^Bearer\s+/i, "").trim();
+  }
+  if (!gitHubApiKey && process.env.GITHUB_API_KEY) {
+    gitHubApiKey = process.env.GITHUB_API_KEY;
+  }
+  return gitHubApiKey;
+}
+
 // ✅ Server-side client hints (simple heuristics)
-// If you already have a shared util, you can replace this with `import { parseClientHints } from './services/clientHints'`
 function parseClientHints(command: string): { environment?: string; service?: string; replicas?: number } {
   const c = (command || '').toLowerCase();
 
@@ -145,7 +164,6 @@ function parseClientHints(command: string): { environment?: string; service?: st
   }
 
   // service (very light heuristics)
-  // capture common "for X" / "of X" / direct tokens like user-service, auth-service, frontend, backend, api
   let service: string | undefined;
   const s1 = c.match(/\b(?:for|of)\s+([a-z0-9._-]+(?:-service)?)\b/);
   const s2 = c.match(/\b([a-z0-9._-]+-service)\b/);
@@ -155,7 +173,179 @@ function parseClientHints(command: string): { environment?: string; service?: st
   return { environment, service, replicas };
 }
 
-// ---------- job simulation ----------
+// ✅ NEW: GitHub Actions job execution
+async function executeWithGitHubActions(
+  jobId: string, 
+  intent: any, 
+  userId: string, 
+  githubToken: string
+): Promise<void> {
+  console.log(`[JOB ${jobId}] Starting GitHub Actions execution`);
+  
+  try {
+    const githubService = new GitHubActionsService();
+    await githubService.authenticate(githubToken);
+
+    // Create workflow inputs based on intent
+    const inputs = {
+      job_id: jobId,
+      action: intent.action,
+      service: intent.service || '',
+      environment: intent.environment || 'development',
+      replicas: intent.replicas?.toString() || '1',
+      user_id: userId,
+      original_command: intent.originalCommand || '',
+    };
+
+    console.log(`[JOB ${jobId}] Dispatching workflow with inputs:`, inputs);
+
+    // Dispatch the workflow
+    await githubService.dispatch(GITHUB_WORKFLOW_FILE, inputs);
+
+    // Update job status to running
+    await supabaseService.updateJobStatus(jobId, 'running', {
+      started_at: new Date().toISOString(),
+      output: [
+        'GitHub Actions workflow dispatched successfully',
+        `Workflow: ${GITHUB_WORKFLOW_FILE}`,
+        `Action: ${intent.action}`,
+        intent.service ? `Service: ${intent.service}` : '',
+        intent.environment ? `Environment: ${intent.environment}` : '',
+        'Waiting for workflow to start...',
+      ].filter(Boolean),
+    });
+
+    // Try to find the run by name pattern
+    const runName = `DCH ${jobId} — ${intent.action}`;
+    console.log(`[JOB ${jobId}] Looking for workflow run: ${runName}`);
+    
+    try {
+      const run = await githubService.findRunByName(GITHUB_WORKFLOW_FILE, runName);
+      console.log(`[JOB ${jobId}] Found workflow run:`, run.id);
+      
+      // Store run tracking info
+      githubJobTracking.set(jobId, { runId: run.id, service: githubService });
+      
+      // Update job with external_job_id and workflow URL
+      await supabaseService.updateJobStatus(jobId, 'running', {
+        external_job_id: run.id.toString(),
+        output: [
+          'GitHub Actions workflow dispatched successfully',
+          `Workflow: ${GITHUB_WORKFLOW_FILE}`,
+          `Run ID: ${run.id}`,
+          `Status: ${run.status}`,
+          `Action: ${intent.action}`,
+          intent.service ? `Service: ${intent.service}` : '',
+          intent.environment ? `Environment: ${intent.environment}` : '',
+          `View workflow: ${githubService.getRunHtmlUrl(run)}`,
+        ].filter(Boolean),
+      });
+
+      // Start polling for completion
+      pollGitHubWorkflow(jobId, run.id, githubService);
+      
+    } catch (findError) {
+      console.warn(`[JOB ${jobId}] Could not find workflow run by name:`, findError);
+      await supabaseService.updateJobStatus(jobId, 'running', {
+        output: [
+          'GitHub Actions workflow dispatched successfully',
+          `Workflow: ${GITHUB_WORKFLOW_FILE}`,
+          'Note: Could not locate specific workflow run for tracking',
+          'Check GitHub Actions tab for workflow status',
+        ],
+      });
+    }
+
+  } catch (error) {
+    console.error(`[JOB ${jobId}] GitHub Actions execution failed:`, error);
+    await supabaseService.updateJobStatus(jobId, 'failed', {
+      completed_at: new Date().toISOString(),
+      error_message: `GitHub Actions error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      output: [
+        'Failed to execute via GitHub Actions',
+        `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'Please check your GitHub token and repository configuration',
+      ],
+    });
+  }
+}
+
+// ✅ NEW: Poll GitHub workflow for completion
+async function pollGitHubWorkflow(jobId: string, runId: number, githubService: GitHubActionsService): Promise<void> {
+  const maxPolls = 60; // 5 minutes at 5-second intervals
+  let polls = 0;
+
+  const poll = async () => {
+    try {
+      polls++;
+      console.log(`[JOB ${jobId}] Polling GitHub workflow run ${runId} (${polls}/${maxPolls})`);
+      
+      const run = await githubService.getRun(runId);
+      const dchStatus = mapGaToDchStatus(run.status as any, run.conclusion as any);
+      
+      console.log(`[JOB ${jobId}] Workflow status: ${run.status}, conclusion: ${run.conclusion}, DCH status: ${dchStatus}`);
+
+      if (dchStatus === 'running') {
+        // Still running, continue polling
+        if (polls < maxPolls) {
+          setTimeout(poll, 5000);
+        } else {
+          // Polling timeout
+          await supabaseService.updateJobStatus(jobId, 'failed', {
+            completed_at: new Date().toISOString(),
+            error_message: 'Workflow polling timeout',
+            output: [
+              'Workflow execution timeout',
+              `Last known status: ${run.status}`,
+              `View workflow: ${githubService.getRunHtmlUrl(run)}`,
+            ],
+          });
+          githubJobTracking.delete(jobId);
+        }
+        return;
+      }
+
+      // Workflow completed
+      const isSuccess = dchStatus === 'completed';
+      const completedAt = new Date().toISOString();
+      
+      await supabaseService.updateJobStatus(jobId, dchStatus, {
+        completed_at: completedAt,
+        ...(isSuccess ? {} : { error_message: `Workflow ${run.conclusion || 'failed'}` }),
+        output: [
+          `GitHub Actions workflow ${isSuccess ? 'completed successfully' : 'failed'}`,
+          `Final status: ${run.status}`,
+          `Conclusion: ${run.conclusion || 'none'}`,
+          `Started: ${run.run_started_at || 'unknown'}`,
+          `Completed: ${completedAt}`,
+          `View workflow: ${githubService.getRunHtmlUrl(run)}`,
+        ],
+      });
+
+      githubJobTracking.delete(jobId);
+      console.log(`[JOB ${jobId}] Workflow execution ${isSuccess ? 'completed' : 'failed'}`);
+      
+    } catch (error) {
+      console.error(`[JOB ${jobId}] Error polling workflow:`, error);
+      if (polls < maxPolls) {
+        // Retry on error
+        setTimeout(poll, 5000);
+      } else {
+        // Give up
+        await supabaseService.updateJobStatus(jobId, 'failed', {
+          completed_at: new Date().toISOString(),
+          error_message: `Workflow polling error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        });
+        githubJobTracking.delete(jobId);
+      }
+    }
+  };
+
+  // Start polling
+  setTimeout(poll, 2000); // Initial delay
+}
+
+// ---------- job simulation (fallback when GitHub Actions not used) ----------
 async function simulateJobExecution(jobId: string, action: string, service?: string, environment?: string) {
   console.log(`[JOB ${jobId}] Starting simulation for ${action}`);
   try {
@@ -374,6 +564,8 @@ app.get('/health', async (_req, res) => {
       database: dbStatus ? 'connected' : 'disconnected',
       version: VERSION,
       activeJobs: jobSimulations.size,
+      githubJobs: githubJobTracking.size,
+      githubActionsEnabled: USE_GITHUB_ACTIONS,
     });
   } catch (error: any) {
     jsonError(res, 500, 'HEALTH_ERROR', error?.message || 'Unknown error');
@@ -393,6 +585,13 @@ app.get('/api', (_req, res) => {
       hasEnvKey: Boolean(process.env.HF_API_KEY),
       model,
       threshold,
+    },
+    github: {
+      enabled: USE_GITHUB_ACTIONS,
+      workflowFile: GITHUB_WORKFLOW_FILE,
+      hasEnvToken: Boolean(process.env.GITHUB_API_KEY),
+      repoOwner: process.env.GH_REPO_OWNER,
+      repoName: process.env.GH_REPO_NAME,
     },
     endpoints: {
       health: 'GET /health',
@@ -420,7 +619,7 @@ app.get('/api/commands/supported', (_req, res) => {
   });
 });
 
-// ✅ FIXED: POST /api/commands with proper user handling and always return parsed_intent
+// ✅ FIXED: POST /api/commands with GitHub Actions integration
 app.post('/api/commands', async (req, res) => {
   let parsedIntent: any = null; // Declare at top level to always be available
 
@@ -450,8 +649,19 @@ app.post('/api/commands', async (req, res) => {
       console.warn('[API] ensureUser failed (ignored for Day 8):', userResult.error);
     }
 
-    // ✅ Extract HF API key using helper function
+    // ✅ Extract API keys
     const hfApiKey = extractHfApiKey(req);
+    const githubToken = extractGitHubApiKey(req);
+
+    // Check GitHub Actions availability
+    if (USE_GITHUB_ACTIONS && !githubToken) {
+      return jsonError(
+        res,
+        400,
+        'MISSING_GITHUB_TOKEN',
+        'GitHub Actions enabled but no token provided. Use X-GitHub-Token header or set GITHUB_API_KEY in .env'
+      );
+    }
 
     // Decide NLU usage + threshold
     const nluOn = typeof enableNLU === "boolean" ? enableNLU : true;
@@ -468,7 +678,7 @@ app.post('/api/commands', async (req, res) => {
       nluEnabled: nluOn,
     });
 
-    // 🔎 NEW: client hints + merge precedence
+    // 🔎 Client hints + merge precedence
     const clientHints = parseClientHints(command);
     console.log('[API] Client hints:', clientHints);
 
@@ -479,7 +689,7 @@ app.post('/api/commands', async (req, res) => {
 
     console.log('[API] Initial parsed intent:', parsedIntent);
 
-    // Merge client hints with parsed intent (client hints fill gaps, replicas takes numeric precedence)
+    // Merge client hints with parsed intent
     const mergedIntent = {
       ...parsedIntent,
       ...(clientHints.environment && !parsedIntent.environment ? { environment: clientHints.environment } : {}),
@@ -539,14 +749,26 @@ app.post('/api/commands', async (req, res) => {
     }
 
     const job = createRes.data;
+    console.log(`[JOB ${job.id}] Created, choosing execution method`);
 
-    console.log(`[JOB ${job.id}] Created, starting simulation`);
-    simulateJobExecution(
-      job.id,
-      intent.action,
-      intent.service ?? undefined,
-      intent.environment ?? undefined
-    );
+    // ✅ Choose execution method: GitHub Actions or simulation
+    if (USE_GITHUB_ACTIONS && githubToken) {
+      console.log(`[JOB ${job.id}] Using GitHub Actions execution`);
+      // Execute via GitHub Actions (async)
+      executeWithGitHubActions(job.id, { ...intent, originalCommand: command }, userId, githubToken)
+        .catch(error => {
+          console.error(`[JOB ${job.id}] GitHub Actions execution failed:`, error);
+        });
+    } else {
+      console.log(`[JOB ${job.id}] Using simulation execution`);
+      // Fall back to simulation
+      simulateJobExecution(
+        job.id,
+        intent.action,
+        intent.service ?? undefined,
+        intent.environment ?? undefined
+      );
+    }
 
     // ✅ Always return parsed_intent in successful response
     return res.status(201).json({
@@ -555,6 +777,7 @@ app.post('/api/commands', async (req, res) => {
       parsed_intent: parsedIntent, // ✅ Always include
       status: job.status,
       created_at: job.created_at,
+      execution_method: USE_GITHUB_ACTIONS && githubToken ? 'github_actions' : 'simulation',
     });
 
   } catch (error: any) {
@@ -575,6 +798,9 @@ app.get('/api/jobs/:id', async (req, res) => {
     const job = await supabaseService.getJob(id);
     if (!job) {return jsonError(res, 404, 'NOT_FOUND', 'Job not found');}
 
+    // ✅ Include GitHub tracking info if available
+    const githubInfo = githubJobTracking.get(id);
+
     return res.json({
       success: true,
       job: {
@@ -590,6 +816,10 @@ app.get('/api/jobs/:id', async (req, res) => {
         updated_at: job.updated_at,
         started_at: job.started_at,
         completed_at: job.completed_at,
+        ...(githubInfo ? {
+          github_run_id: githubInfo.runId,
+          is_github_job: true,
+        } : {}),
       },
     });
   } catch (error: any) {
@@ -629,6 +859,8 @@ app.get('/api/jobs', async (req, res) => {
         created_at: j.created_at,
         updated_at: j.updated_at,
         completed_at: j.completed_at,
+        external_job_id: j.external_job_id,
+        is_github_job: Boolean(j.external_job_id),
       })),
     });
   } catch (error: any) {
@@ -660,9 +892,16 @@ app.get('/debug', (_req, res) => {
       HF_API_KEY: process.env.HF_API_KEY ? 'SET' : 'NOT SET',
       HF_MODEL: process.env.HF_MODEL || 'facebook/bart-large-mnli (default)',
       CONFIDENCE_THRESHOLD: process.env.CONFIDENCE_THRESHOLD || '0.6 (default)',
+      USE_GITHUB_ACTIONS: USE_GITHUB_ACTIONS ? 'ENABLED' : 'DISABLED',
+      GITHUB_API_KEY: process.env.GITHUB_API_KEY ? 'SET' : 'NOT SET',
+      GH_REPO_OWNER: process.env.GH_REPO_OWNER || 'NOT SET',
+      GH_REPO_NAME: process.env.GH_REPO_NAME || 'NOT SET',
+      GH_WORKFLOW_FILE: GITHUB_WORKFLOW_FILE,
+      GH_DEFAULT_REF: process.env.GH_DEFAULT_REF || 'main (default)',
     },
     timestamp: new Date().toISOString(),
     activeJobs: jobSimulations.size,
+    githubJobs: githubJobTracking.size,
   });
 });
 
@@ -695,6 +934,41 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   );
 });
 
+// ---------- cleanup on shutdown ----------
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, cleaning up...');
+  
+  // Clear all job simulations
+  for (const [jobId, timeout] of jobSimulations.entries()) {
+    clearTimeout(timeout);
+    console.log(`[JOB ${jobId}] Cleaned up simulation timeout`);
+  }
+  jobSimulations.clear();
+  
+  // Clear GitHub job tracking
+  githubJobTracking.clear();
+  
+  console.log('Cleanup complete');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, cleaning up...');
+  
+  // Clear all job simulations
+  for (const [jobId, timeout] of jobSimulations.entries()) {
+    clearTimeout(timeout);
+    console.log(`[JOB ${jobId}] Cleaned up simulation timeout`);
+  }
+  jobSimulations.clear();
+  
+  // Clear GitHub job tracking
+  githubJobTracking.clear();
+  
+  console.log('Cleanup complete');
+  process.exit(0);
+});
+
 // ---------- start ----------
 app.listen(PORT, () => {
   console.log(`🚀 DevCommandHub API server running on http://localhost:${PORT}`);
@@ -702,7 +976,11 @@ app.listen(PORT, () => {
   console.log(`📚 API info: http://localhost:${PORT}/api`);
   console.log(`🔎 Debug role:  http://localhost:${PORT}/debug/role`);
   console.log(`⚡ Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔧 Job lifecycle simulation: ENABLED`);
+  console.log(`🔧 Job execution: ${USE_GITHUB_ACTIONS ? 'GitHub Actions + Simulation fallback' : 'Simulation only'}`);
+  if (USE_GITHUB_ACTIONS) {
+    console.log(`📋 Workflow file: ${GITHUB_WORKFLOW_FILE}`);
+    console.log(`📦 Repository: ${process.env.GH_REPO_OWNER}/${process.env.GH_REPO_NAME}`);
+  }
 });
 
 export default app;
