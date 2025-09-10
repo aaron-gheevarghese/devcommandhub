@@ -37,6 +37,18 @@ export class GitHubActionsService {
     });
   }
 
+  async listWorkflows() {
+  if (!this.octokit) {
+    throw new Error('GitHub not authenticated');
+  }
+  const { data } = await this.octokit.rest.actions.listRepoWorkflows({
+    owner: this.owner,
+    repo: this.repo
+  });
+  return data.workflows || [];
+}
+
+
   // Find the run we just started by its run-name ("DCH <jobId> — ...")
   async findRunByName(workflowFile: string, runName: string, tries = 12, delayMs = 1500) {
     if (!this.octokit) {throw new Error('GitHub not authenticated');}
