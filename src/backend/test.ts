@@ -45,7 +45,13 @@ if (envResult.error) {
 
 console.log('🔑 Checking critical env vars...');
 console.log('TEST_USER_ID:', process.env.TEST_USER_ID ? '✅ Set' : '❌ Missing');
-console.log('GITHUB_API_KEY:', process.env.GITHUB_API_KEY ? '✅ Set' : '❌ Missing');
+const token =
+  process.env.GITHUB_API_KEY ||
+  process.env.GH_TOKEN ||
+  process.env.GITHUB_TOKEN;
+
+console.log('GitHub token available:', token ? '✅ Yes' : '❌ Missing');
+
 console.log('HF_API_KEY:', process.env.HF_API_KEY ? '✅ Set' : '❌ Missing');
 
 console.log('📦 Attempting service imports...');

@@ -1,7 +1,4 @@
 // src/backend/src/services/githubActions.ts
-import path from 'path';
-import dotenv from 'dotenv';
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 import { Octokit } from '@octokit/rest';
 
@@ -24,10 +21,22 @@ export class GitHubActionsService {
   private repo  = process.env.GH_REPO_NAME!;
   private ref   = process.env.GH_DEFAULT_REF || 'main';
 
-  async authenticate(token: string) {
-    this.octokit = new Octokit({ auth: token });
-    await this.octokit.rest.users.getAuthenticated();
+  async authenticate(token?: string) {
+  const authToken =
+    token ||
+    process.env.GITHUB_API_KEY ||
+    process.env.GH_TOKEN ||
+    process.env.GITHUB_TOKEN;
+
+  if (!authToken) {
+    throw new Error('GitHub token not provided or set in environment');
   }
+
+  this.octokit = new Octokit({ auth: authToken });
+  await this.octokit.rest.users.getAuthenticated();
+}
+
+
 
   // Dispatch a workflow by file name (e.g., "ops.yml") with inputs
   async dispatch(workflowFile: string, inputs: Record<string, any>, ref = this.ref) {
