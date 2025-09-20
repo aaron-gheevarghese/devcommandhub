@@ -10,7 +10,7 @@ on:
       user_id: { description: "User ID", required: false }
       original_command: { description: "Original command", required: false }
 
-run-name: DCH ${{ inputs.job_id }} — ${{ inputs.action }} ${{ inputs.service }} @ ${{ inputs.environment }}
+run-name: DCH ${{ inputs.job_id }} - ${{ inputs.action }} ${{ inputs.service }} @ ${{ inputs.environment }}
 
 jobs:
   ops:

@@ -63,37 +63,39 @@ import { parseCommand } from './src/services/nluService';
 
 const TEST_USER_ID = process.env.TEST_USER_ID;
 const GITHUB_TOKEN = process.env.GITHUB_API_KEY;
-const WORKFLOW_FILE = process.env.GH_WORKFLOW_FILE || 'ops.yml';
+const WORKFLOW_FILE =
+  process.env.GH_WORKFLOW_FILE ||
+  process.env.GH_OPS_WORKFLOW_FILE ||
+  'ops.yml';
+
 
 async function testGitHubService() {
   console.log('\n🔧 Testing GitHub Service...');
-  
   if (!GITHUB_TOKEN) {
     console.error('❌ GITHUB_API_KEY not set in environment');
     return false;
   }
-
   try {
     const service = new GitHubActionsService();
     await service.authenticate(GITHUB_TOKEN);
     console.log('✅ GitHub authentication successful');
-    
     // Test workflow file exists
     try {
       const workflows = await service.listWorkflows();
-      const targetWorkflow = workflows.find(w => w.path.includes(WORKFLOW_FILE));
-      
+      console.log('Available workflows:', workflows.map(w => `${w.name} (${w.path}) [${w.id}]`));
+      const targetWorkflow = workflows.find(
+        w => w.path.endsWith(String(WORKFLOW_FILE)) ||
+             w.id === Number(WORKFLOW_FILE) ||
+             w.name === 'DevCommandHub Ops'
+      );
       if (targetWorkflow) {
-        console.log(`✅ Workflow file found: ${WORKFLOW_FILE}`);
-        console.log(`   ID: ${targetWorkflow.id}, State: ${targetWorkflow.state}`);
+        console.log(`Found workflow: ${targetWorkflow.name} ${targetWorkflow.path} id=${targetWorkflow.id}`);
       } else {
-        console.log(`⚠️  Workflow file not found: ${WORKFLOW_FILE}`);
-        console.log('   Available workflows:', workflows.map(w => w.path));
+        console.log(`Could not find workflow for ${WORKFLOW_FILE}`);
       }
     } catch (error) {
-      console.log(`⚠️  Could not list workflows: ${error instanceof Error ? error.message : error}`);
+      console.log(`⚠️ Could not list workflows: ${error instanceof Error ? error.message : error}`);
     }
-
     return true;
   } catch (error) {
     console.error('❌ GitHub service test failed:', error instanceof Error ? error.message : error);
