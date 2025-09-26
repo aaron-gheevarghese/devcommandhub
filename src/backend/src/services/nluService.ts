@@ -18,6 +18,27 @@ export type ParsedIntent = {
   error?: string;
 };
 
+function extractServiceToken(c: string): string | null {
+  // 1) Exact service-like tokens with suffix
+  const withSuffix = c.match(/\b([a-z][\w.-]{1,30}-(?:service|svc|app))\b/);
+  if (withSuffix?.[1]) {
+    return withSuffix[1].replace(/-(svc|app)$/, '-service');
+  }
+  // 2) Known keywords, optionally followed by a suffix
+  const kw = c.match(/\b(api|backend|server|web|webapp|frontend|db|database|worker|auth|user|payment|notification|gateway|proxy)(?:-(?:service|svc|app))?\b/);
+  if (kw?.[0]) {
+    let tok = kw[0]
+      .replace(/\bdb\b/, 'database')              // normalize db to database
+      .replace(/-(svc|app)$/, '-service');        // normalize suffix variants
+    if (!/-service$/.test(tok)) {tok = `${tok}-service`;}
+    return tok;
+  }
+  // 3) Generic fallback near prepositions
+  const generic = c.match(/\b([a-z][\w.-]{1,30})\b(?=\s+(?:to|in|on|for|$))/);
+  if (generic?.[1]) {return generic[1];}
+  return null;
+}
+
 export function regexParse(command: string): ParsedIntent {
   const c = command.toLowerCase();
   
@@ -37,28 +58,8 @@ export function regexParse(command: string): ParsedIntent {
     }
   }
   
-  // More comprehensive service matching
-  const servicePatterns = [
-    // Specific service patterns first (more precise)
-    /\b(api|backend|server|web|webapp|frontend|db|database|worker|auth|user|payment|notification|gateway|proxy)-?(?:service|svc|app)?\b/,
-    // Generic service-name patterns
-    /\b([a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*)-(?:service|svc|app)\b/,
-    // Fallback to any reasonable service name
-    /\b([a-zA-Z][a-zA-Z0-9._-]{1,30})\b(?=\s+(?:to|in|on|for|$))/
-  ];
-  
-  let service: string | null = null; // ✅ Fix: Explicit type annotation
-  for (const pattern of servicePatterns) {
-    const match = c.match(pattern);
-    if (match?.[1]) {
-      // Skip common words that aren't services
-      const word = match[1].toLowerCase();
-      if (!['the', 'and', 'or', 'but', 'to', 'in', 'on', 'for', 'show', 'get', 'set'].includes(word)) {
-        service = match[1];
-        break;
-      }
-    }
-  }
+  // Use new service extraction function
+  let service: string | null = extractServiceToken(c);
   
   // Enhanced replicas matching
   const replicaPatterns = [
@@ -252,18 +253,13 @@ export async function parseCommand(opts: {
     console.log(`[NLU] Top result: ${top?.action} (${top?.score?.toFixed(3)}), accept: ${accept}`);
 
     return {
-      action: accept ? top.action : "unknown",
+      action: accept ? top.action : coarse.action,   // was "unknown"
       environment: coarse.environment,
       service: coarse.service,
       replicas: coarse.replicas,
       confidence: Number((top?.score ?? 0).toFixed(3)),
       source: accept ? `hf:${model}` : "regex-fallback",
-      debug: { 
-        model, 
-        threshold: confidenceThreshold, 
-        isZeroShot: isZeroShotModel(model), 
-        rankedActions: ranked.slice(0, 6) 
-      },
+      debug: { model, threshold: confidenceThreshold, isZeroShot: isZeroShotModel(model), rankedActions: ranked.slice(0, 6) },
     };
   } catch (err: any) {
     console.error('[NLU] HF API error:', err.message);

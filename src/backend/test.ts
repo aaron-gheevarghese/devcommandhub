@@ -8,6 +8,16 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 
+// Ensure fetch exists in Node
+async function ensureFetch() {
+  // @ts-ignore
+  if (typeof fetch === 'undefined') {
+    const mod = await import('node-fetch');
+    // @ts-ignore
+    global.fetch = mod.default as any;
+  }
+}
+
 // Enhanced error handling
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🚨 UNHANDLED REJECTION:');
@@ -49,21 +59,23 @@ function loadEnvironment() {
 
 loadEnvironment();
 
-// Import services with error handling - FIXED for your actual file structure
+// Import services with error handling - FIXED to use correct file names
 let GitHubActionsService: any, mapGaToDchStatus: any, supabaseService: any, parseCommand: any;
 
 try {
-  // Your actual file is githubActions.ts, not githubService.ts
-  ({ GitHubActionsService, mapGaToDchStatus } = require('./src/services/githubActions'));
+  // Fixed: Using correct relative paths from src/backend/
+  ({ GitHubActionsService, mapGaToDchStatus } = require('./src/services/githubService'));
   ({ supabaseService } = require('./src/services/supabase'));
   ({ parseCommand } = require('./src/services/nluService'));
   console.log('✅ All service imports successful');
+  
 } catch (error) {
   console.error('❌ Service import failed:', error);
-  console.log('\n🔍 Expected file structure (based on your actual files):');
-  console.log('   ./src/services/githubActions.ts');
-  console.log('   ./src/services/supabase.ts');
-  console.log('   ./src/services/nluService.ts');
+  console.log('\n🔍 Expected file structure (from src/backend/):');
+  console.log('   ../services/githubService.ts');
+  console.log('   ../services/supabase.ts');
+  console.log('   ../services/nluService.ts');
+  console.log('\n🔧 If files have different names, update the imports above');
   process.exit(1);
 }
 
@@ -76,6 +88,7 @@ interface TestConfig {
   workflowFile: string;
   branch: string;
   hfApiKey?: string;
+  liveDispatch?: boolean;
 }
 
 function validateConfig(): TestConfig | null {
@@ -87,6 +100,7 @@ function validateConfig(): TestConfig | null {
     workflowFile: process.env.GH_WORKFLOW_FILE || 'ops.yml',
     branch: process.env.GH_DEFAULT_REF || 'main',
     hfApiKey: process.env.HF_API_KEY,
+    liveDispatch: process.env.DCH_LIVE_DISPATCH === '1' || process.env.DCH_LIVE_DISPATCH === 'true',
   };
 
   console.log('\n🔧 Configuration Validation:');
@@ -95,6 +109,8 @@ function validateConfig(): TestConfig | null {
   Object.entries(config).forEach(([key, value]) => {
     if (key === 'hfApiKey') {
       console.log(`   ${key}: ${value ? '✅ Set' : '⚠️  Optional - will use regex fallback'}`);
+    } else if (key === 'liveDispatch') {
+      console.log(`   ${key}: ${value ? '✅ Enabled' : 'ℹ️  Disabled'}`);
     } else if (!value) {
       console.log(`   ${key}: ❌ MISSING`);
       missing.push(key);
@@ -114,6 +130,7 @@ function validateConfig(): TestConfig | null {
     console.log('   GH_WORKFLOW_FILE=ops.yml (default)');
     console.log('   GH_DEFAULT_REF=main (default)');
     console.log('   HF_API_KEY=your-huggingface-token');
+    console.log('   DCH_LIVE_DISPATCH=1 to trigger a real run');
     return null;
   }
 
@@ -223,7 +240,7 @@ function detectConfigurationIssues(runner: TestRunner, config: TestConfig) {
   const tokenPattern = /^(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{82})$/;
   if (config.githubToken && !tokenPattern.test(config.githubToken)) {
     runner.addResult('GitHub Token Format', 'fail', 'Token format may be invalid', true);
-    console.log('   💡 Expected: ghp_... (classic) or github_pat_... (fine-grained)');
+    console.log('   💡 Expected: ghp_... (classic) or github_pat_... (fine grained)');
   } else if (config.githubToken) {
     runner.addResult('GitHub Token Format', 'pass', 'Token format appears valid');
   }
@@ -261,7 +278,7 @@ async function testGitHubPreFlight(runner: TestRunner, config: TestConfig) {
       runner.addResult('GitHub API Connectivity', 'pass', `Connected as: ${user.login}`, true);
     } else if (response.status === 401) {
       runner.addResult('GitHub API Connectivity', 'fail', 'Invalid token or expired', true);
-      return; // No point continuing if token is bad
+      return; // Stop this block if token is bad
     } else {
       runner.addResult('GitHub API Connectivity', 'fail', `HTTP ${response.status}`, true);
       return;
@@ -301,7 +318,7 @@ async function testGitHubPreFlight(runner: TestRunner, config: TestConfig) {
   // Test 3: Workflow file existence via GitHub API (only if using filename)
   if (!config.workflowFile.match(/^\d+$/)) {
     try {
-      const workflowUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/contents/.github/workflows/${config.workflowFile}`;
+      const workflowUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/contents/.github/workflows/${config.workflowFile}?ref=${config.branch}`;
       const response = await fetch(workflowUrl, {
         headers: { 'Authorization': `token ${config.githubToken}` }
       });
@@ -319,40 +336,34 @@ async function testGitHubPreFlight(runner: TestRunner, config: TestConfig) {
   }
 }
 
-// Token Scope Validation
+// Token Scope Validation - Updated for fine-grained PATs
 async function validateTokenScopes(runner: TestRunner, config: TestConfig) {
   console.log('\n🔐 GITHUB TOKEN SCOPE VALIDATION');
   console.log('-'.repeat(40));
-
   try {
-    const response = await fetch('https://api.github.com/user', {
-      headers: { 'Authorization': `token ${config.githubToken}` }
-    });
-
-    const scopes = response.headers.get('x-oauth-scopes')?.split(', ') || [];
-    console.log('   Detected token scopes:', scopes.join(', ') || 'none');
-
-    // Classic token validation
+    const resp = await fetch('https://api.github.com/user', { headers: { Authorization: `token ${config.githubToken}` } });
+    const scopesHeader = resp.headers.get('x-oauth-scopes') || '';
+    const scopes = scopesHeader ? scopesHeader.split(', ').filter(Boolean) : [];
+    const isFineGrained = /^github_pat_/.test(config.githubToken);
+    console.log('   Detected token scopes:', scopes.join(', ') || (isFineGrained ? 'fine-grained (header empty)' : 'none'));
+    if (scopes.length === 0 && isFineGrained) {
+      runner.addResult('Token Type', 'pass', 'Fine grained token');
+      runner.addResult('Token Scope: repo', 'skip', 'Classic scopes header is empty on fine grained tokens');
+      runner.addResult('Token Scope: workflow', 'skip', 'Classic scopes header is empty on fine grained tokens');
+      return;
+    }
     if (scopes.includes('repo')) {
       runner.addResult('Token Scope: repo', 'pass', 'Full repository access');
     } else if (scopes.includes('public_repo')) {
-      runner.addResult('Token Scope: repo', 'fail', 'Only public repo access - private repos will fail', true);
+      runner.addResult('Token Scope: repo', 'fail', 'Only public_repo scope', true);
     } else {
       runner.addResult('Token Scope: repo', 'fail', 'No repository access scope', true);
     }
-
     if (scopes.includes('workflow')) {
       runner.addResult('Token Scope: workflow', 'pass', 'Can manage workflows');
     } else {
       runner.addResult('Token Scope: workflow', 'fail', 'Cannot dispatch workflows', true);
     }
-
-    // Fine-grained token note
-    if (scopes.length === 0) {
-      console.log('   💡 No classic scopes detected - may be fine-grained token');
-      runner.addResult('Token Type', 'pass', 'Fine-grained token (scope validation limited)');
-    }
-
   } catch (error) {
     runner.addResult('Token Scope Validation', 'fail', `Cannot validate scopes: ${error}`);
   }
@@ -372,8 +383,9 @@ async function testEnvironmentSetup(runner: TestRunner, config: TestConfig) {
       // Validate workflow file content
       try {
         const content = fs.readFileSync(workflowPath, 'utf8');
-        const hasWorkflowDispatch = content.includes('workflow_dispatch');
-        const hasRequiredInputs = ['job_id', 'action', 'service'].every(input => content.includes(input));
+        const hasWorkflowDispatch = /workflow_dispatch\s*:/.test(content);
+        const requiredInputs = ['job_id', 'action', 'service'];
+        const hasRequiredInputs = requiredInputs.every(input => content.includes(input));
         
         if (hasWorkflowDispatch && hasRequiredInputs) {
           runner.addResult('Workflow File Content', 'pass', 'Contains required dispatch inputs');
@@ -407,24 +419,24 @@ async function testGitHubAuthentication(runner: TestRunner, config: TestConfig) 
       runner.addResult('Workflow Listing', 'pass', `Found ${workflows.length} workflows`);
 
       // Look for target workflow - handles both filename and numeric ID
-      const targetWorkflow = workflows.find(w => 
-        w.path.endsWith(config.workflowFile) || 
-        w.id.toString() === config.workflowFile ||
+      const targetWorkflow = workflows.find((w: any) => 
+        (w.path && w.path.endsWith(config.workflowFile)) || 
+        (w.id && w.id.toString() === config.workflowFile) ||
         w.name === 'DevCommandHub Ops'
       );
 
       if (targetWorkflow) {
-        runner.addResult('Workflow Discovery', 'pass', `Found: ${targetWorkflow.name} (${targetWorkflow.path}) [ID: ${targetWorkflow.id}]`, true);
+        runner.addResult('Workflow Discovery', 'pass', `Found: ${targetWorkflow.name} (${targetWorkflow.path || 'no-path'}) [ID: ${targetWorkflow.id}]`, true);
         
         // If using numeric ID, confirm it matches
-        if (config.workflowFile === targetWorkflow.id.toString()) {
+        if (config.workflowFile === String(targetWorkflow.id)) {
           runner.addResult('Workflow ID Validation', 'pass', `Numeric ID ${config.workflowFile} matches workflow`);
         }
       } else {
         runner.addResult('Workflow Discovery', 'fail', `Cannot find workflow: ${config.workflowFile}`, true);
         console.log('   Available workflows:');
-        workflows.forEach(w => {
-          console.log(`     ${w.name} (${w.path}) [ID: ${w.id}]`);
+        workflows.forEach((w: any) => {
+          console.log(`     ${w.name} (${w.path || 'no-path'}) [ID: ${w.id}]`);
         });
       }
     } catch (error) {
@@ -519,11 +531,15 @@ async function testNLUService(runner: TestRunner, config: TestConfig) {
 
       const actionMatch = result.action === testCase.expectedAction;
       const serviceMatch = result.service === testCase.expectedService;
-      const confident = result.confidence >= 0.6;
+      const confident = (result.confidence || 0) >= 0.6;
 
-      if (actionMatch && serviceMatch) {
+      if (actionMatch && serviceMatch && confident) {
         runner.addResult(`NLU: "${testCase.command}"`, 'pass', 
-          `✓ ${result.action}/${result.service || 'none'} (${(result.confidence * 100).toFixed(1)}%)`);
+          `✓ ${result.action}/${result.service || 'none'} (${((result.confidence || 0) * 100).toFixed(1)}%)`);
+        correctPredictions++;
+      } else if (actionMatch && serviceMatch) {
+        runner.addResult(`NLU: "${testCase.command}"`, 'pass', 
+          `✓ ${result.action}/${result.service || 'none'} (low confidence ${(result.confidence * 100).toFixed(1)}%)`);
         correctPredictions++;
       } else {
         runner.addResult(`NLU: "${testCase.command}"`, 'fail',
@@ -602,11 +618,11 @@ async function testWorkflowDispatch(runner: TestRunner, config: TestConfig, mode
     const service = new GitHubActionsService();
     await service.authenticate(config.githubToken);
     
-    // Use your service's dispatch method
+    // Use your service dispatch method
     await service.dispatch(config.workflowFile, dispatchInputs, config.branch);
-    runner.addResult('Workflow Dispatch (Live)', 'pass', 'Successfully triggered workflow');
+    runner.addResult('Workflow Dispatch (Live)', 'pass', 'Successfully triggered workflow', true);
 
-    // Since your service has findRunByName, try to find the created run
+    // Try to find the created run
     try {
       const runName = `DCH ${dispatchInputs.job_id} - ${dispatchInputs.action} ${dispatchInputs.service} @ ${dispatchInputs.environment}`;
       console.log(`   Looking for run with name: ${runName}`);
@@ -617,91 +633,87 @@ async function testWorkflowDispatch(runner: TestRunner, config: TestConfig, mode
         runner.addResult('Run Creation Verification', 'pass', `Found run: ${run.html_url}`);
         console.log(`   🔗 Run URL: ${run.html_url}`);
         console.log(`   📊 Status: ${run.status} | Conclusion: ${run.conclusion || 'pending'}`);
+      } else {
+        runner.addResult('Run Creation Verification', 'fail', 'Could not locate run in time');
       }
     } catch (error) {
       runner.addResult('Run Creation Verification', 'fail', `Cannot find created run: ${error}`);
       console.log('   This may be normal if the run takes time to appear in the API');
     }
 
-  } catch (error) {
-    runner.addResult('Workflow Dispatch (Live)', 'fail', `Dispatch failed: ${error}`, true);
+  } catch (error: any) {
+    runner.addResult('Workflow Dispatch (Live)', 'fail', `Dispatch failed: ${error?.message || error}`, true);
     
     // Provide helpful error diagnosis
-    if (error && typeof error === 'object' && 'message' in error) {
-      const errorMsg = (error as Error).message;
-      if (errorMsg.includes('422')) {
-        console.log('   💡 422 error usually means:');
-        console.log('      - Workflow file missing required inputs');
-        console.log('      - Branch specified does not contain the workflow file');
-        console.log('      - Workflow_dispatch trigger not properly configured');
-      } else if (errorMsg.includes('404')) {
-        console.log('   💡 404 error usually means:');
-        console.log('      - Workflow file not found');
-        console.log('      - Repository not accessible');
-        console.log('      - Wrong workflow ID/filename');
-      }
+    const errorMsg = String(error?.message || error || '');
+    if (errorMsg.includes('422')) {
+      console.log('   💡 422 error usually means:');
+      console.log('      - Workflow file missing required inputs');
+      console.log('      - Branch specified does not contain the workflow file');
+      console.log('      - workflow_dispatch trigger not properly configured');
+    } else if (errorMsg.includes('404')) {
+      console.log('   💡 404 error usually means:');
+      console.log('      - Workflow not found by filename or ID');
+      console.log('      - Token lacks access to repo or workflow scope');
+      console.log('      - Using the wrong owner or repo');
+    } else if (errorMsg.includes('401')) {
+      console.log('   💡 401 error means unauthorized. Check token value and expiration.');
+    } else {
+      console.log('   ℹ️ For more detail enable debug logs in your GitHubActionsService implementation');
     }
   }
 }
 
-// Main test runner
-async function runIntegrationTests() {
+/* -------------------------
+   Main Orchestration
+-------------------------- */
+
+async function main() {
+  await ensureFetch();
+
   const config = validateConfig();
+  const runner = new TestRunner();
+
   if (!config) {
-    process.exit(1);
+    // Config missing. Print a short summary and exit non zero.
+    runner.addResult('Config Validation', 'fail', 'Missing required environment variables', true);
+    const ok = runner.printSummary();
+    process.exit(ok ? 0 : 1);
   }
 
-  const runner = new TestRunner();
-  
-  console.log('\n🧪 Starting comprehensive integration tests...\n');
-
-  // Phase 1: Configuration and Pre-flight checks
+  // Static checks
   detectConfigurationIssues(runner, config);
+
+  // External checks
   await testGitHubPreFlight(runner, config);
   await validateTokenScopes(runner, config);
-
-  // Phase 2: Core integration tests
   await testEnvironmentSetup(runner, config);
+
+  // Service checks
   await testGitHubAuthentication(runner, config);
   await testSupabaseIntegration(runner, config);
   await testNLUService(runner, config);
   testStatusMapping(runner);
 
-  // Phase 3: Workflow dispatch test (optional)
-  const shouldDispatch = process.argv.includes('--dispatch');
-  const liveMode = process.argv.includes('--live');
-  
-  if (shouldDispatch) {
-    await testWorkflowDispatch(runner, config, liveMode ? 'live' : 'dry');
+  // Dispatch tests
+  await testWorkflowDispatch(runner, config, 'dry');
+  if (config.liveDispatch) {
+    await testWorkflowDispatch(runner, config, 'live');
   } else {
-    runner.addResult('Workflow Dispatch', 'skip', 'Use --dispatch flag to test');
+    console.log('\nℹ️ Live dispatch is disabled. Set DCH_LIVE_DISPATCH=1 to enable.');
   }
 
-  // Final summary and recommendations
-  const isReady = runner.printSummary();
-  
-  if (!isReady) {
-    console.log('\n🔧 NEXT STEPS TO FIX FAILURES:');
-    console.log('1. Check your .env file has all required variables');
-    console.log('2. Verify GitHub token has correct scopes (repo, workflow)');
-    console.log('3. Ensure .github/workflows/ops.yml exists with workflow_dispatch');
-    console.log('4. Test Supabase connection and user permissions');
-    console.log('5. Run: npx ts-node src/backend/test.ts --dispatch --live (when ready)');
-  } else {
-    console.log('\n🎯 READY FOR DEPLOYMENT:');
-    console.log('Your GitHub Actions integration is fully validated and ready!');
-    console.log('Next steps:');
-    console.log('- Integrate with your VS Code extension');
-    console.log('- Set up production monitoring');
-    console.log('- Consider implementing user authentication');
-  }
-
-  process.exit(isReady ? 0 : 1);
+  const ok = runner.printSummary();
+  process.exit(ok ? 0 : 1);
 }
 
-// Execute tests with enhanced error handling
-runIntegrationTests().catch(error => {
-  console.error('💥 Test suite crashed:', error);
-  console.error('Stack:', error.stack);
-  process.exit(1);
-});
+// Only run if executed directly
+if (require.main === module) {
+  // Wrap main to catch top level async errors
+  main().catch(err => {
+    console.error('❌ Fatal error in test runner:', err);
+    process.exit(1);
+  });
+}
+
+export {};

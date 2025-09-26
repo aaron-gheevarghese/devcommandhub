@@ -95,6 +95,8 @@ function toInt(num: string, min = 0, max = 1000): number | undefined {
   return undefined;
 }
 
+
+
 class CommandParser {
   private patterns: Array<{
     pattern: RegExp;
@@ -105,7 +107,7 @@ class CommandParser {
     // deploy <service> to <environment>
     {
       // allow "to" / "onto", optional "env"/"environment"
-      pattern: /^deploy\s+([a-zA-Z0-9._-]+)\s+(?:to|onto)\s+([a-zA-Z0-9._-]+)(?:\s*(?:env|environment))?$/i,
+      pattern: /^deploy\s+((?:[a-zA-Z0-9._]+(?:-[a-zA-Z0-9._]+)*)+)\s+(?:to|onto)\s+([a-zA-Z0-9._-]+)(?:\s*(?:env|environment))?$/i,
       action: 'deploy',
       extract: (m) => ({
         action: 'deploy',
@@ -116,7 +118,7 @@ class CommandParser {
     },
     // deploy <service>  (defaults to production)
     {
-      pattern: /^deploy\s+([a-zA-Z0-9._-]+)$/i,
+      pattern: /^deploy\s+((?:[a-zA-Z0-9._]+(?:-[a-zA-Z0-9._]+)*)+)$/i,
       action: 'deploy',
       extract: (m) => ({
         action: 'deploy',
@@ -129,7 +131,7 @@ class CommandParser {
     // ---------------- LOGS ----------------
     // show logs for/of <service>
     {
-      pattern: /^(?:show\s+)?logs?\s+(?:for|of)\s+([a-zA-Z0-9._-]+)(?:\s+last\s+(\d+)(?:\s*lines?)?)?$/i,
+      pattern: /^(?:show\s+)?logs?\s+(?:for|of)\s+((?:[a-zA-Z0-9._]+(?:-[a-zA-Z0-9._]+)*)+)(?:\s+last\s+(\d+)(?:\s*lines?)?)?$/i,
       action: 'logs',
       extract: (m) => ({
         action: 'logs',
@@ -140,7 +142,7 @@ class CommandParser {
     },
     // logs <service> [last N]
     {
-      pattern: /^logs?\s+([a-zA-Z0-9._-]+)(?:\s+last\s+(\d+)(?:\s*lines?)?)?$/i,
+      pattern: /^logs?\s+((?:[a-zA-Z0-9._]+(?:-[a-zA-Z0-9._]+)*)+)(?:\s+last\s+(\d+)(?:\s*lines?)?)?$/i,
       action: 'logs',
       extract: (m) => ({
         action: 'logs',
@@ -153,7 +155,7 @@ class CommandParser {
     // ---------------- SCALE ----------------
     // scale <service> to <n> [replica|replicas]
     {
-      pattern: /^scale\s+([a-zA-Z0-9._-]+)\s+to\s+(\d+)(?:\s*(?:replica|replicas))?$/i,
+      pattern: /^scale\s+((?:[a-zA-Z0-9._]+(?:-[a-zA-Z0-9._]+)*)+)\s+to\s+(\d+)(?:\s*(?:replica|replicas))?$/i,
       action: 'scale',
       extract: (m) => ({
         action: 'scale',
@@ -165,7 +167,7 @@ class CommandParser {
 
     // ---------------- ROLLBACK ----------------
     {
-      pattern: /^rollback\s+([a-zA-Z0-9._-]+)$/i,
+      pattern: /^rollback\s+((?:[a-zA-Z0-9._]+(?:-[a-zA-Z0-9._]+)*)+)$/i,
       action: 'rollback',
       extract: (m) => ({
         action: 'rollback',
@@ -177,7 +179,7 @@ class CommandParser {
     // ---------------- STATUS ----------------
     // status/health [of] <service>
     {
-      pattern: /^(?:status|health)\s+(?:of\s+)?([a-zA-Z0-9._-]+)$/i,
+      pattern: /^(?:status|health)\s+(?:of\s+)?((?:[a-zA-Z0-9._]+(?:-[a-zA-Z0-9._]+)*)+)$/i,
       action: 'status',
       extract: (m) => ({
         action: 'status',
@@ -189,7 +191,7 @@ class CommandParser {
     // ---------------- RESTART ----------------
     // restart <service> [in <env>]
     {
-      pattern: /^restart\s+([a-zA-Z0-9._-]+)(?:\s+(?:in|on)\s+([a-zA-Z0-9._-]+))?$/i,
+      pattern: /^restart\s+((?:[a-zA-Z0-9._]+(?:-[a-zA-Z0-9._]+)*)+)(?:\s+(?:in|on)\s+([a-zA-Z0-9._-]+))?$/i,
       action: 'restart',
       extract: (m) => ({
         action: 'restart',
