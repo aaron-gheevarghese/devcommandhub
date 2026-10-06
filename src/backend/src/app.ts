@@ -7,7 +7,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 
 // ✅ CRITICAL FIX: Force load the same .env file as other modules
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 import { supabaseService, supabaseAdmin } from './services/supabase';
 import { commandParser, validateIntent } from './services/commandParser';
@@ -216,7 +216,7 @@ async function executeWithGitHubActions(
     });
 
     // Try to find the run by name pattern
-    const runName = `DCH ${jobId} — ${intent.action}`;
+    const runName = `DCH ${jobId} `; // prefix of ops.yml run-name
     console.log(`[JOB ${jobId}] Looking for workflow run: ${runName}`);
     
     try {
@@ -366,6 +366,7 @@ async function simulateJobExecution(jobId: string, action: string, service?: str
         console.error(`[JOB ${jobId}] Error updating to running:`, error);
       }
     }, runningDelay);
+    jobSimulations.set(`${jobId}:running`, runningTimeout);
 
     const completionDelay = 6000 + Math.random() * 4000;
     const completionTimeout = setTimeout(async () => {
@@ -388,6 +389,7 @@ async function simulateJobExecution(jobId: string, action: string, service?: str
           });
         }
         jobSimulations.delete(jobId);
+        jobSimulations.delete(`${jobId}:running`);
       } catch (error) {
         console.error(`[JOB ${jobId}] Error completing job:`, error);
         try {
@@ -563,7 +565,7 @@ app.get('/health', async (_req, res) => {
       timestamp: new Date().toISOString(),
       database: dbStatus ? 'connected' : 'disconnected',
       version: VERSION,
-      activeJobs: jobSimulations.size,
+      activeJobs: [...jobSimulations.keys()].filter(k => !k.endsWith(':running')).length,
       githubJobs: githubJobTracking.size,
       githubActionsEnabled: USE_GITHUB_ACTIONS,
     });
@@ -700,6 +702,7 @@ app.post('/api/commands', async (req, res) => {
     // Apply explicit slot overrides (highest precedence)
     const intent: any = { ...mergedIntent };
     const overrides = slotOverrides || {};
+    if (typeof overrides.action === 'string' && overrides.action) { intent.action = overrides.action.toLowerCase(); }
     if (overrides.service) { intent.service = String(overrides.service); }
     if (overrides.environment) { intent.environment = String(overrides.environment); }
     if (typeof overrides.replicas === 'number') { intent.replicas = Number(overrides.replicas); }
@@ -733,12 +736,24 @@ app.post('/api/commands', async (req, res) => {
     }
 
     // Create job – use an explicit result object to avoid TS confusion
-    const createRes = await supabaseService.createJob({
+    let createRes = await supabaseService.createJob({
       user_id: userId,
       original_command: command,
       parsed_intent: intent,
       job_type: intent.action,
     });
+
+    // jobs.user_id references auth.users; the extension sends a random per-install UUID
+    // that won't exist there (FK violation 23503), so fall back to TEST_USER_ID.
+    if (createRes.error?.code === '23503' && TEST_USER_ID && userId !== TEST_USER_ID) {
+      console.warn('[API] user_id not found in auth.users, retrying with TEST_USER_ID');
+      createRes = await supabaseService.createJob({
+        user_id: TEST_USER_ID,
+        original_command: command,
+        parsed_intent: intent,
+        job_type: intent.action,
+      });
+    }
 
     if (createRes.error || !createRes.data) {
       console.error('Error creating job:', createRes.error);
@@ -845,8 +860,7 @@ app.get('/api/jobs', async (req, res) => {
       );
     }
 
-    const jobs = await supabaseService.getUserJobs(userId, lim);
-    const filtered = status ? jobs.filter((j: any) => j.status === status) : jobs;
+    const filtered = await supabaseService.getUserJobs(userId, lim, typeof status === 'string' ? status : undefined);
 
     return res.json({
       success: true,
@@ -900,7 +914,7 @@ app.get('/debug', (_req, res) => {
       GH_DEFAULT_REF: process.env.GH_DEFAULT_REF || 'main (default)',
     },
     timestamp: new Date().toISOString(),
-    activeJobs: jobSimulations.size,
+    activeJobs: [...jobSimulations.keys()].filter(k => !k.endsWith(':running')).length,
     githubJobs: githubJobTracking.size,
   });
 });
@@ -935,39 +949,16 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 });
 
 // ---------- cleanup on shutdown ----------
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, cleaning up...');
-  
-  // Clear all job simulations
-  for (const [jobId, timeout] of jobSimulations.entries()) {
-    clearTimeout(timeout);
-    console.log(`[JOB ${jobId}] Cleaned up simulation timeout`);
-  }
+function shutdown(signal: string) {
+  console.log(`${signal} received, cleaning up...`);
+  for (const timeout of jobSimulations.values()) {clearTimeout(timeout);}
   jobSimulations.clear();
-  
-  // Clear GitHub job tracking
   githubJobTracking.clear();
-  
   console.log('Cleanup complete');
   process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, cleaning up...');
-  
-  // Clear all job simulations
-  for (const [jobId, timeout] of jobSimulations.entries()) {
-    clearTimeout(timeout);
-    console.log(`[JOB ${jobId}] Cleaned up simulation timeout`);
-  }
-  jobSimulations.clear();
-  
-  // Clear GitHub job tracking
-  githubJobTracking.clear();
-  
-  console.log('Cleanup complete');
-  process.exit(0);
-});
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ---------- start ----------
 app.listen(PORT, () => {

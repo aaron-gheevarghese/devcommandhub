@@ -176,12 +176,14 @@ export class SupabaseService {
     }
   }
 
-  async getUserJobs(userId: string, limit = 50): Promise<Job[]> {
+  async getUserJobs(userId: string, limit = 50, status?: string): Promise<Job[]> {
     try {
-      const { data, error } = await this.supabase
+      let query = this.supabase
         .from('jobs')
-        .select('*')
-        .eq('user_id', userId)
+        .select('id, original_command, job_type, status, created_at, updated_at, completed_at, external_job_id')
+        .eq('user_id', userId);
+      if (status) {query = query.eq('status', status);}
+      const { data, error } = await query
         .order('created_at', { ascending: false })
         .limit(limit);
 

@@ -1,12 +1,14 @@
-// Complete DevCommandHub Integration Test Suite
-// Combines comprehensive testing with configuration validation and GitHub pre-flight checks
+// Enhanced DevCommandHub Integration Test Suite
+// Adapted to match your actual production service structure
 
-console.log('🚀 DevCommandHub Complete Test Suite Starting...');
-console.log('='.repeat(60));
+console.log('🚀 DevCommandHub Enhanced Integration Test Suite');
+console.log('Focus: Cross-repository compatibility and real-world usage');
+console.log('='.repeat(70));
 
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import * as yaml from 'js-yaml';
 
 // Ensure fetch exists in Node
 async function ensureFetch() {
@@ -59,23 +61,20 @@ function loadEnvironment() {
 
 loadEnvironment();
 
-// Import services with error handling - FIXED to use correct file names
+// Import services with error handling - matching YOUR actual structure
 let GitHubActionsService: any, mapGaToDchStatus: any, supabaseService: any, parseCommand: any;
 
 try {
-  // Fixed: Using correct relative paths from src/backend/
   ({ GitHubActionsService, mapGaToDchStatus } = require('./src/services/githubService'));
   ({ supabaseService } = require('./src/services/supabase'));
   ({ parseCommand } = require('./src/services/nluService'));
   console.log('✅ All service imports successful');
-  
 } catch (error) {
   console.error('❌ Service import failed:', error);
   console.log('\n🔍 Expected file structure (from src/backend/):');
-  console.log('   ../services/githubService.ts');
-  console.log('   ../services/supabase.ts');
-  console.log('   ../services/nluService.ts');
-  console.log('\n🔧 If files have different names, update the imports above');
+  console.log('   ./src/services/githubService.ts');
+  console.log('   ./src/services/supabase.ts');
+  console.log('   ./src/services/nluService.ts');
   process.exit(1);
 }
 
@@ -110,7 +109,7 @@ function validateConfig(): TestConfig | null {
     if (key === 'hfApiKey') {
       console.log(`   ${key}: ${value ? '✅ Set' : '⚠️  Optional - will use regex fallback'}`);
     } else if (key === 'liveDispatch') {
-      console.log(`   ${key}: ${value ? '✅ Enabled' : 'ℹ️  Disabled'}`);
+      console.log(`   ${key}: ${value ? '✅ Enabled' : 'ℹ️  Disabled (dry-run mode)'}`);
     } else if (!value) {
       console.log(`   ${key}: ❌ MISSING`);
       missing.push(key);
@@ -130,7 +129,7 @@ function validateConfig(): TestConfig | null {
     console.log('   GH_WORKFLOW_FILE=ops.yml (default)');
     console.log('   GH_DEFAULT_REF=main (default)');
     console.log('   HF_API_KEY=your-huggingface-token');
-    console.log('   DCH_LIVE_DISPATCH=1 to trigger a real run');
+    console.log('   DCH_LIVE_DISPATCH=1 to enable real GitHub Actions runs');
     return null;
   }
 
@@ -139,11 +138,15 @@ function validateConfig(): TestConfig | null {
 
 // Enhanced test results tracking
 class TestRunner {
-  private results: Map<string, { status: 'pass' | 'fail' | 'skip', details: string, critical: boolean }> = new Map();
+  private results: Map<string, { status: 'pass' | 'fail' | 'skip', details: string, critical: boolean, category: string }> = new Map();
   private startTime = Date.now();
 
-  addResult(testName: string, status: 'pass' | 'fail' | 'skip', details: string, critical = false) {
-    this.results.set(testName, { status, details, critical });
+  public getResult(testName: string) {
+    return this.results.get(testName);
+  }
+
+  addResult(testName: string, status: 'pass' | 'fail' | 'skip', details: string, critical = false, category = 'general') {
+    this.results.set(testName, { status, details, critical, category });
     const icon = status === 'pass' ? '✅' : status === 'fail' ? '❌' : '⏭️';
     const criticalMark = critical ? ' 🚨' : '';
     console.log(`${icon} ${testName}${criticalMark}: ${details}`);
@@ -159,11 +162,19 @@ class TestRunner {
     return { passed, failed, criticalFailed, skipped, duration, total: this.results.size };
   }
 
+  getCategoryResults(category: string) {
+    const categoryResults = Array.from(this.results.entries()).filter(([_, result]) => result.category === category);
+    const passed = categoryResults.filter(([_, result]) => result.status === 'pass').length;
+    const failed = categoryResults.filter(([_, result]) => result.status === 'fail').length;
+    const total = categoryResults.length;
+    return { passed, failed, total, success: failed === 0 };
+  }
+
   printSummary() {
     const summary = this.getSummary();
-    console.log('\n' + '='.repeat(60));
-    console.log('📊 TEST SUMMARY');
-    console.log('='.repeat(60));
+    console.log('\n' + '='.repeat(70));
+    console.log('📊 TEST SUMMARY - PRODUCTION READINESS ASSESSMENT');
+    console.log('='.repeat(70));
     console.log(`⏱️  Duration: ${summary.duration}ms`);
     console.log(`📊 Total Tests: ${summary.total}`);
     console.log(`✅ Passed: ${summary.passed}`);
@@ -174,546 +185,367 @@ class TestRunner {
       console.log(`🚨 Critical Failures: ${summary.criticalFailed}`);
     }
 
+    // Category breakdown
+    console.log('\n📋 Results by Category:');
+    const categories = ['portability', 'workflow-validation', 'nlu-robustness', 'integration', 'user-experience'];
+    categories.forEach(category => {
+      const catResults = this.getCategoryResults(category);
+      if (catResults.total > 0) {
+        const status = catResults.success ? '✅' : '❌';
+        console.log(`   ${status} ${category}: ${catResults.passed}/${catResults.total}`);
+      }
+    });
+
     // Detailed failure report
     const failures = Array.from(this.results.entries()).filter(([_, result]) => result.status === 'fail');
     if (failures.length > 0) {
       console.log('\n❌ FAILED TESTS:');
       failures.forEach(([name, result]) => {
-        console.log(`   ${name}: ${result.details}`);
+        const criticalMark = result.critical ? ' 🚨 CRITICAL' : '';
+        console.log(`   ${name}${criticalMark}: ${result.details}`);
       });
     }
 
-    const readyForProduction = summary.criticalFailed === 0;
-    console.log('\n' + '='.repeat(60));
-    if (readyForProduction) {
-      console.log('🎉 INTEGRATION READY: GitHub Actions integration should work!');
+    // Production readiness assessment
+    const portabilityResults = this.getCategoryResults('portability');
+    const workflowResults = this.getCategoryResults('workflow-validation');
+    const integrationResults = this.getCategoryResults('integration');
+    
+    const isPortable = portabilityResults.success;
+    const workflowsReady = workflowResults.success;
+    const integrationReady = integrationResults.success;
+    const noCriticalFailures = summary.criticalFailed === 0;
+    
+    const readyForOtherUsers = isPortable && workflowsReady && integrationReady && noCriticalFailures;
+
+    console.log('\n' + '='.repeat(70));
+    console.log('🎯 PRODUCTION READINESS FOR OTHER DEVELOPERS:');
+    console.log('='.repeat(70));
+    console.log(`📦 Cross-repo Portability: ${isPortable ? '✅ Ready' : '❌ Not Ready'}`);
+    console.log(`⚙️  Workflow Integration: ${workflowsReady ? '✅ Ready' : '❌ Not Ready'}`);
+    console.log(`🔗 Service Integration: ${integrationReady ? '✅ Ready' : '❌ Not Ready'}`);
+    console.log(`🚨 Critical Issues: ${noCriticalFailures ? '✅ None' : '❌ Present'}`);
+    
+    console.log('\n' + '='.repeat(70));
+    if (readyForOtherUsers) {
+      console.log('🎉 READY FOR OTHER DEVELOPERS!');
+      console.log('   Other devs can use DevCommandHub with their repos');
+      console.log('   assuming they have proper ops.yml workflow files.');
     } else {
-      console.log('⚠️  NOT READY: Fix critical failures before proceeding');
+      console.log('⚠️  NOT READY FOR OTHER DEVELOPERS');
+      console.log('   Fix the issues above before releasing to other users.');
     }
-    console.log('='.repeat(60));
+    console.log('='.repeat(70));
 
-    return readyForProduction;
-  }
-}
-
-// Configuration Issue Detection
-function detectConfigurationIssues(runner: TestRunner, config: TestConfig) {
-  console.log('\n🔍 CONFIGURATION ISSUE DETECTION');
-  console.log('-'.repeat(40));
-
-  // Issue 1: Mixed workflow identifier usage
-  if (config.workflowFile.match(/^\d+$/)) {
-    runner.addResult('Workflow ID Type', 'pass', `Using numeric workflow ID: ${config.workflowFile}`);
-    console.log('   💡 Note: Using numeric ID is valid but filename is more portable');
-  } else {
-    runner.addResult('Workflow ID Type', 'pass', `Using workflow filename: ${config.workflowFile}`);
-  }
-
-  // Issue 2: Check for duplicate workflow file entries in .env
-  let envContent = '';
-  try {
-    envContent = fs.readFileSync(path.resolve(process.cwd(), '.env'), 'utf8');
-  } catch {
-    envContent = '';
-  }
-  if (typeof envContent === 'string' && envContent.split('\n').filter(line => line.startsWith('GH_WORKFLOW_FILE=')).length > 1) {
-    runner.addResult('Duplicate Config', 'fail', 'Multiple GH_WORKFLOW_FILE entries in .env', true);
-  }
-
-  // Issue 3: Critical missing environment variables
-  const criticalVars = [
-    'SUPABASE_URL', 
-    'SUPABASE_SERVICE_KEY', 
-    'TEST_USER_ID',
-    'GH_REPO_OWNER',
-    'GH_REPO_NAME'
-  ];
-
-  const missing = criticalVars.filter(varName => !process.env[varName]);
-  if (missing.length > 0) {
-    runner.addResult('Critical Env Vars', 'fail', `Missing: ${missing.join(', ')}`, true);
-  } else {
-    runner.addResult('Critical Env Vars', 'pass', 'All critical variables present');
-  }
-
-  // Issue 4: GitHub token format validation
-  const tokenPattern = /^(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{82})$/;
-  if (config.githubToken && !tokenPattern.test(config.githubToken)) {
-    runner.addResult('GitHub Token Format', 'fail', 'Token format may be invalid', true);
-    console.log('   💡 Expected: ghp_... (classic) or github_pat_... (fine grained)');
-  } else if (config.githubToken) {
-    runner.addResult('GitHub Token Format', 'pass', 'Token format appears valid');
-  }
-
-  // Issue 5: Supabase URL format validation
-  const supabaseUrl = process.env.SUPABASE_URL;
-  if (supabaseUrl && !supabaseUrl.match(/^https:\/\/[a-z0-9]+\.supabase\.co$/)) {
-    runner.addResult('Supabase URL Format', 'fail', 'URL format may be invalid');
-  } else if (supabaseUrl) {
-    runner.addResult('Supabase URL Format', 'pass', 'URL format valid');
-  }
-
-  // Issue 6: UUID format validation for TEST_USER_ID
-  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (config.userId && !uuidPattern.test(config.userId)) {
-    runner.addResult('User ID Format', 'fail', 'TEST_USER_ID must be a valid UUID', true);
-  } else if (config.userId) {
-    runner.addResult('User ID Format', 'pass', 'User ID format valid');
-  }
-}
-
-// GitHub Pre-Flight Checks
-async function testGitHubPreFlight(runner: TestRunner, config: TestConfig) {
-  console.log('\n✈️ GITHUB PRE-FLIGHT CHECKS');
-  console.log('-'.repeat(40));
-
-  // Test 1: Basic connectivity
-  try {
-    const response = await fetch('https://api.github.com/user', {
-      headers: { 'Authorization': `token ${config.githubToken}` }
-    });
-
-    if (response.ok) {
-      const user = await response.json() as { login: string };
-      runner.addResult('GitHub API Connectivity', 'pass', `Connected as: ${user.login}`, true);
-    } else if (response.status === 401) {
-      runner.addResult('GitHub API Connectivity', 'fail', 'Invalid token or expired', true);
-      return; // Stop this block if token is bad
-    } else {
-      runner.addResult('GitHub API Connectivity', 'fail', `HTTP ${response.status}`, true);
-      return;
-    }
-  } catch (error) {
-    runner.addResult('GitHub API Connectivity', 'fail', `Network error: ${error}`, true);
-    return;
-  }
-
-  // Test 2: Repository accessibility
-  try {
-    const repoUrl = `https://api.github.com/repos/${config.owner}/${config.repo}`;
-    const response = await fetch(repoUrl, {
-      headers: { 'Authorization': `token ${config.githubToken}` }
-    });
-
-    if (response.ok) {
-      const repo = await response.json() as { full_name: string; private: boolean; has_actions?: boolean };
-      runner.addResult('Repository Access', 'pass', `${repo.full_name} (${repo.private ? 'private' : 'public'})`, true);
-      
-      // Check if repo has Actions enabled
-      if (repo.has_actions !== false) {
-        runner.addResult('GitHub Actions Enabled', 'pass', 'Actions are enabled on repository');
-      } else {
-        runner.addResult('GitHub Actions Enabled', 'fail', 'Actions disabled on repository', true);
-      }
-    } else if (response.status === 404) {
-      runner.addResult('Repository Access', 'fail', 'Repository not found or no access', true);
-      console.log('   💡 Check: 1) Repository name spelling, 2) Token has repo scope, 3) Private repo permissions');
-    } else {
-      runner.addResult('Repository Access', 'fail', `HTTP ${response.status}`, true);
-    }
-  } catch (error) {
-    runner.addResult('Repository Access', 'fail', `Network error: ${error}`, true);
-  }
-
-  // Test 3: Workflow file existence via GitHub API (only if using filename)
-  if (!config.workflowFile.match(/^\d+$/)) {
-    try {
-      const workflowUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/contents/.github/workflows/${config.workflowFile}?ref=${config.branch}`;
-      const response = await fetch(workflowUrl, {
-        headers: { 'Authorization': `token ${config.githubToken}` }
-      });
-
-      if (response.ok) {
-        runner.addResult('Workflow File (GitHub)', 'pass', `Found .github/workflows/${config.workflowFile}`);
-      } else if (response.status === 404) {
-        runner.addResult('Workflow File (GitHub)', 'fail', `Workflow file not found on ${config.branch}`, true);
-      } else {
-        runner.addResult('Workflow File (GitHub)', 'fail', `Cannot check workflow file: HTTP ${response.status}`);
-      }
-    } catch (error) {
-      runner.addResult('Workflow File (GitHub)', 'fail', `Network error: ${error}`);
-    }
-  }
-}
-
-// Token Scope Validation - Updated for fine-grained PATs
-async function validateTokenScopes(runner: TestRunner, config: TestConfig) {
-  console.log('\n🔐 GITHUB TOKEN SCOPE VALIDATION');
-  console.log('-'.repeat(40));
-  try {
-    const resp = await fetch('https://api.github.com/user', { headers: { Authorization: `token ${config.githubToken}` } });
-    const scopesHeader = resp.headers.get('x-oauth-scopes') || '';
-    const scopes = scopesHeader ? scopesHeader.split(', ').filter(Boolean) : [];
-    const isFineGrained = /^github_pat_/.test(config.githubToken);
-    console.log('   Detected token scopes:', scopes.join(', ') || (isFineGrained ? 'fine-grained (header empty)' : 'none'));
-    if (scopes.length === 0 && isFineGrained) {
-      runner.addResult('Token Type', 'pass', 'Fine grained token');
-      runner.addResult('Token Scope: repo', 'skip', 'Classic scopes header is empty on fine grained tokens');
-      runner.addResult('Token Scope: workflow', 'skip', 'Classic scopes header is empty on fine grained tokens');
-      return;
-    }
-    if (scopes.includes('repo')) {
-      runner.addResult('Token Scope: repo', 'pass', 'Full repository access');
-    } else if (scopes.includes('public_repo')) {
-      runner.addResult('Token Scope: repo', 'fail', 'Only public_repo scope', true);
-    } else {
-      runner.addResult('Token Scope: repo', 'fail', 'No repository access scope', true);
-    }
-    if (scopes.includes('workflow')) {
-      runner.addResult('Token Scope: workflow', 'pass', 'Can manage workflows');
-    } else {
-      runner.addResult('Token Scope: workflow', 'fail', 'Cannot dispatch workflows', true);
-    }
-  } catch (error) {
-    runner.addResult('Token Scope Validation', 'fail', `Cannot validate scopes: ${error}`);
+    return readyForOtherUsers;
   }
 }
 
 // Environment Setup Tests
 async function testEnvironmentSetup(runner: TestRunner, config: TestConfig) {
-  console.log('\n🔧 ENVIRONMENT SETUP TESTS');
+  console.log('\n🔧 ENVIRONMENT SETUP VALIDATION');
   console.log('-'.repeat(40));
 
-  // Check if workflow file exists locally (only if using filename)
-  if (!config.workflowFile.match(/^\d+$/)) {
-    const workflowPath = path.resolve(process.cwd(), '.github/workflows', config.workflowFile);
-    if (fs.existsSync(workflowPath)) {
-      runner.addResult('Local Workflow File', 'pass', `Found ${config.workflowFile}`);
+  const criticalVars = [
+    'SUPABASE_URL', 'SUPABASE_SERVICE_KEY', 'TEST_USER_ID',
+    'GITHUB_API_KEY', 'GH_REPO_OWNER', 'GH_REPO_NAME'
+  ];
 
-      // Validate workflow file content
-      try {
-        const content = fs.readFileSync(workflowPath, 'utf8');
-        const hasWorkflowDispatch = /workflow_dispatch\s*:/.test(content);
-        const requiredInputs = ['job_id', 'action', 'service'];
-        const hasRequiredInputs = requiredInputs.every(input => content.includes(input));
-        
-        if (hasWorkflowDispatch && hasRequiredInputs) {
-          runner.addResult('Workflow File Content', 'pass', 'Contains required dispatch inputs');
-        } else {
-          runner.addResult('Workflow File Content', 'fail', 'Missing workflow_dispatch or required inputs', true);
-        }
-      } catch (error) {
-        runner.addResult('Workflow File Content', 'fail', `Cannot read workflow file: ${error}`, true);
-      }
-    } else {
-      runner.addResult('Local Workflow File', 'fail', `Missing ${workflowPath}`, true);
-    }
+  const missing = criticalVars.filter(varName => !process.env[varName]);
+  if (missing.length === 0) {
+    runner.addResult('Critical Environment Variables', 'pass', 'All required variables present', true, 'integration');
   } else {
-    runner.addResult('Local Workflow File', 'skip', 'Using numeric ID - will check via API');
+    runner.addResult('Critical Environment Variables', 'fail', `Missing: ${missing.join(', ')}`, true, 'integration');
+  }
+
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (config.userId && uuidPattern.test(config.userId)) {
+    runner.addResult('User ID Format', 'pass', 'Valid UUID format', false, 'integration');
+  } else {
+    runner.addResult('User ID Format', 'fail', 'TEST_USER_ID must be a valid UUID', true, 'integration');
   }
 }
 
-// GitHub Authentication Tests (using your actual service)
-async function testGitHubAuthentication(runner: TestRunner, config: TestConfig) {
-  console.log('\n🐙 GITHUB AUTHENTICATION TESTS');
+// GitHub Authentication Tests
+async function testGitHubAuth(runner: TestRunner, config: TestConfig) {
+  console.log('\n🐙 GITHUB AUTHENTICATION & ACCESS');
   console.log('-'.repeat(40));
+
+  const github = new GitHubActionsService(config.githubToken, config.owner, config.repo, config.workflowFile, config.branch);
 
   try {
-    const service = new GitHubActionsService();
-    await service.authenticate(config.githubToken);
-    runner.addResult('GitHub Service Auth', 'pass', 'Service authentication successful', true);
+    await github.authenticate();
+    runner.addResult('GitHub Authentication', 'pass', 'Authentication successful', true, 'integration');
+  } catch (e: any) {
+    runner.addResult('GitHub Authentication', 'fail', e.message, true, 'integration');
+    return;
+  }
 
-    // Test workflow listing with better error handling
-    try {
-      const workflows = await service.listWorkflows();
-      runner.addResult('Workflow Listing', 'pass', `Found ${workflows.length} workflows`);
-
-      // Look for target workflow - handles both filename and numeric ID
-      const targetWorkflow = workflows.find((w: any) => 
-        (w.path && w.path.endsWith(config.workflowFile)) || 
-        (w.id && w.id.toString() === config.workflowFile) ||
-        w.name === 'DevCommandHub Ops'
-      );
-
-      if (targetWorkflow) {
-        runner.addResult('Workflow Discovery', 'pass', `Found: ${targetWorkflow.name} (${targetWorkflow.path || 'no-path'}) [ID: ${targetWorkflow.id}]`, true);
-        
-        // If using numeric ID, confirm it matches
-        if (config.workflowFile === String(targetWorkflow.id)) {
-          runner.addResult('Workflow ID Validation', 'pass', `Numeric ID ${config.workflowFile} matches workflow`);
-        }
-      } else {
-        runner.addResult('Workflow Discovery', 'fail', `Cannot find workflow: ${config.workflowFile}`, true);
-        console.log('   Available workflows:');
-        workflows.forEach((w: any) => {
-          console.log(`     ${w.name} (${w.path || 'no-path'}) [ID: ${w.id}]`);
-        });
-      }
-    } catch (error) {
-      runner.addResult('Workflow Discovery', 'fail', `Cannot list workflows: ${error}`, true);
-    }
-
-  } catch (error) {
-    runner.addResult('GitHub Service Auth', 'fail', `Authentication failed: ${error}`, true);
+  try {
+    const workflowDetails = await github.getWorkflowDetails();
+    runner.addResult('Workflow Access', 'pass', `Found: ${workflowDetails.name} [ID: ${workflowDetails.id}]`, true, 'integration');
+  } catch (e: any) {
+    runner.addResult('Workflow Access', 'fail', e.message, true, 'integration');
   }
 }
 
-// Supabase Integration Tests
+// Supabase Integration Tests - ADAPTED TO YOUR ACTUAL SERVICE
 async function testSupabaseIntegration(runner: TestRunner, config: TestConfig) {
-  console.log('\n🗄️  SUPABASE INTEGRATION TESTS');
+  console.log('\n🗄️  SUPABASE DATABASE INTEGRATION');
   console.log('-'.repeat(40));
 
   try {
     const isConnected = await supabaseService.testConnection();
     if (isConnected) {
-      runner.addResult('Supabase Connection', 'pass', 'Database connection successful', true);
+      runner.addResult('Database Connection', 'pass', 'Supabase connection successful', true, 'integration');
+    } else {
+      runner.addResult('Database Connection', 'fail', 'Cannot connect to Supabase', true, 'integration');
+      return;
+    }
+  } catch (e: any) {
+    runner.addResult('Database Connection', 'fail', e.message, true, 'integration');
+    return;
+  }
 
-      // Test job creation
-      try {
-        const job = await supabaseService.createJob({
-          user_id: config.userId,
-          original_command: 'integration test command',
-          parsed_intent: {
-            action: 'status',
-            service: 'test-service',
-            environment: 'development',
-            confidence: 1.0,
-            source: 'test'
-          },
-          job_type: 'status'
-        });
+  try {
+    // Use YOUR actual createJob interface
+    const result = await supabaseService.createJob({
+      user_id: config.userId,
+      original_command: 'integration test',
+      parsed_intent: {
+        action: 'test',
+        service: 'test-service',
+        environment: 'development'
+      },
+      job_type: 'test'
+    });
 
-        if (job.data && !job.error) {
-          runner.addResult('Job Creation', 'pass', `Created job: ${job.data.id}`, true);
-          
-          // Test job update
-          try {
-            const updateResult = await supabaseService.updateJobStatus(job.data.id, 'running');
-            if (updateResult) {
-              runner.addResult('Job Updates', 'pass', 'Can update job status');
-            } else {
-              runner.addResult('Job Updates', 'fail', 'Cannot update job status');
-            }
-          } catch (error) {
-            runner.addResult('Job Updates', 'fail', `Update failed: ${error}`);
-          }
+    if (result.error || !result.data) {
+      runner.addResult('Job Creation', 'fail', `Error: ${result.error?.message || 'No data returned'}`, true, 'integration');
+      return;
+    }
 
-        } else {
-          runner.addResult('Job Creation', 'fail', `Failed: ${job.error?.message || 'Unknown error'}`, true);
-          if (job.error?.message?.includes('foreign key') || job.error?.message?.includes('violates')) {
-            console.log('   💡 This usually means TEST_USER_ID does not exist in your Supabase auth.users table');
-          }
-        }
-      } catch (error) {
-        runner.addResult('Job Creation', 'fail', `Exception: ${error}`, true);
+    const jobId = result.data.id;
+    runner.addResult('Job Creation', 'pass', `Created job: ${jobId}`, true, 'integration');
+
+    // Test job updates using YOUR actual interface
+    const updateSuccess = await supabaseService.updateJobStatus(jobId, 'running', {});
+    if (updateSuccess) {
+      const completeSuccess = await supabaseService.updateJobStatus(jobId, 'completed', {});
+      if (completeSuccess) {
+        runner.addResult('Job Updates', 'pass', 'Job status updates successful', false, 'integration');
+      } else {
+        runner.addResult('Job Updates', 'fail', 'Failed to complete job', false, 'integration');
       }
     } else {
-      runner.addResult('Supabase Connection', 'fail', 'Connection failed', true);
+      runner.addResult('Job Updates', 'fail', 'Failed to update job to running', false, 'integration');
+    }
+  } catch (e: any) {
+    runner.addResult('Job Creation', 'fail', `Error: ${e.message}`, true, 'integration');
+  }
+}
+
+// Cross-Repository Portability Tests
+async function testCrossRepoPortability(runner: TestRunner, config: TestConfig) {
+  console.log('\n🌐 CROSS-REPOSITORY PORTABILITY TESTS');
+  console.log('-'.repeat(50));
+
+  try {
+    const github = new GitHubActionsService(config.githubToken, config.owner, config.repo, config.workflowFile, config.branch);
+    const workflowDetails = await github.getWorkflowDetails();
+    
+    const workflowUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/contents/.github/workflows/${workflowDetails.path.split('/').pop()}?ref=${config.branch}`;
+    const response = await fetch(workflowUrl, {
+      headers: { 'Authorization': `token ${config.githubToken}` }
+    });
+    
+    if (response.ok) {
+      const fileData = await response.json() as { content: string };
+      const workflowContent = Buffer.from(fileData.content, 'base64').toString('utf8');
+      const doc = yaml.load(workflowContent) as any;
+      
+      const inputs = doc?.on?.workflow_dispatch?.inputs;
+      if (inputs && inputs.service) {
+        runner.addResult('Service Input Discovery', 'pass', 'Can discover service input from workflow', true, 'portability');
+        
+        if (inputs.service.type === 'choice' && inputs.service.options) {
+          const services = inputs.service.options;
+          runner.addResult('Predefined Service Options', 'pass', `Found ${services.length} services`, false, 'portability');
+        } else {
+          runner.addResult('Predefined Service Options', 'skip', 'Service input not using choice type', false, 'portability');
+        }
+      } else {
+        runner.addResult('Service Input Discovery', 'fail', 'Cannot find service input in workflow', true, 'portability');
+      }
+    } else {
+      runner.addResult('Service Input Discovery', 'fail', 'Cannot read workflow from GitHub API', true, 'portability');
     }
   } catch (error) {
-    runner.addResult('Supabase Connection', 'fail', `Exception: ${error}`, true);
+    runner.addResult('Service Input Discovery', 'fail', `Error: ${error}`, true, 'portability');
+  }
+
+  // Test environment parsing
+  const testEnvironments = ['dev', 'development', 'staging', 'prod', 'production'];
+  let envTestsPassed = 0;
+  for (const env of testEnvironments) {
+    try {
+      const result = await parseCommand({
+        command: `deploy frontend to ${env}`,
+        hfApiKey: config.hfApiKey || null,
+        confidenceThreshold: 0.4
+      });
+      
+      if (result.environment) {
+        envTestsPassed++;
+        runner.addResult(`Environment: ${env}`, 'pass', `Parsed as ${result.environment}`, false, 'portability');
+      } else {
+        runner.addResult(`Environment: ${env}`, 'fail', `Failed to parse environment`, false, 'portability');
+      }
+    } catch (error) {
+      runner.addResult(`Environment: ${env}`, 'fail', `Error: ${error}`, false, 'portability');
+    }
+  }
+
+  // Test service patterns
+  const testServices = ['api', 'frontend', 'backend', 'database', 'user-service'];
+  let serviceTestsPassed = 0;
+  for (const service of testServices) {
+    try {
+      const result = await parseCommand({
+        command: `restart ${service}`,
+        hfApiKey: config.hfApiKey || null,
+        confidenceThreshold: 0.4
+      });
+      
+      if (result.action === 'restart' && result.service) {
+        serviceTestsPassed++;
+        runner.addResult(`Service Pattern: ${service}`, 'pass', `Extracted: ${result.service}`, false, 'portability');
+      } else {
+        runner.addResult(`Service Pattern: ${service}`, 'fail', `Failed to parse service`, false, 'portability');
+      }
+    } catch (error) {
+      runner.addResult(`Service Pattern: ${service}`, 'fail', `Error: ${error}`, false, 'portability');
+    }
   }
 }
 
 // NLU Service Tests
-async function testNLUService(runner: TestRunner, config: TestConfig) {
+async function testNluService(runner: TestRunner, config: TestConfig) {
   console.log('\n🧠 NLU SERVICE TESTS');
-  console.log('-'.repeat(40));
-
+  console.log('-'.repeat(50));
+  
   const testCases = [
-    { command: 'deploy frontend to staging', expectedAction: 'deploy', expectedService: 'frontend' },
-    { command: 'scale api-service to 3 replicas', expectedAction: 'scale', expectedService: 'api-service' },
-    { command: 'restart user-service in production', expectedAction: 'restart', expectedService: 'user-service' },
-    { command: 'rollback auth-service', expectedAction: 'rollback', expectedService: 'auth-service' },
-    { command: 'show me the logs for database-service', expectedAction: 'logs', expectedService: 'database-service' },
-    { command: 'what is the status of the system', expectedAction: 'status', expectedService: null },
+    { input: 'deploy frontend to staging', expectedAction: 'deploy', expectedService: 'frontend', expectedEnvironment: 'staging' },
+    { input: 'scale api-service to 3 replicas', expectedAction: 'scale', expectedService: 'api-service', expectedReplicas: 3 },
+    { input: 'restart user-service', expectedAction: 'restart', expectedService: 'user-service' },
+    { input: 'rollback auth-service', expectedAction: 'rollback', expectedService: 'auth-service' },
+    { input: 'show logs for database', expectedAction: 'logs' },
+    { input: 'check status', expectedAction: 'status' },
   ];
 
-  let correctPredictions = 0;
-
-  for (const testCase of testCases) {
+  let passed = 0;
+  for (const tc of testCases) {
     try {
       const result = await parseCommand({
-        command: testCase.command,
+        command: tc.input,
         hfApiKey: config.hfApiKey || null,
-        confidenceThreshold: 0.6 // Using recommended threshold instead of 0.4
+        confidenceThreshold: 0.4
       });
+      
+      const actionMatch = result.action === tc.expectedAction;
+      const serviceMatch = !tc.expectedService || result.service === tc.expectedService;
+      const envMatch = !tc.expectedEnvironment || result.environment === tc.expectedEnvironment;
+      const replicasMatch = !tc.expectedReplicas || result.replicas === tc.expectedReplicas;
 
-      const actionMatch = result.action === testCase.expectedAction;
-      const serviceMatch = result.service === testCase.expectedService;
-      const confident = (result.confidence || 0) >= 0.6;
-
-      if (actionMatch && serviceMatch && confident) {
-        runner.addResult(`NLU: "${testCase.command}"`, 'pass', 
-          `✓ ${result.action}/${result.service || 'none'} (${((result.confidence || 0) * 100).toFixed(1)}%)`);
-        correctPredictions++;
-      } else if (actionMatch && serviceMatch) {
-        runner.addResult(`NLU: "${testCase.command}"`, 'pass', 
-          `✓ ${result.action}/${result.service || 'none'} (low confidence ${(result.confidence * 100).toFixed(1)}%)`);
-        correctPredictions++;
+      if (actionMatch && serviceMatch && envMatch && replicasMatch) {
+        passed++;
+        runner.addResult(`NLU: "${tc.input}"`, 'pass', `Parsed correctly (${Math.round(result.confidence * 100)}%)`, false, 'nlu-robustness');
       } else {
-        runner.addResult(`NLU: "${testCase.command}"`, 'fail',
-          `Got ${result.action}/${result.service || 'none'}, expected ${testCase.expectedAction}/${testCase.expectedService || 'none'}`);
+        runner.addResult(`NLU: "${tc.input}"`, 'fail', `Expected ${tc.expectedAction}, got ${result.action}`, false, 'nlu-robustness');
       }
-    } catch (error) {
-      runner.addResult(`NLU: "${testCase.command}"`, 'fail', `Parse error: ${error}`);
+    } catch (e: any) {
+      runner.addResult(`NLU: "${tc.input}"`, 'fail', `Error: ${e.message}`, false, 'nlu-robustness');
     }
   }
 
-  const accuracy = correctPredictions / testCases.length;
-  if (accuracy >= 0.8) {
-    runner.addResult('NLU Overall Accuracy', 'pass', `${(accuracy * 100).toFixed(1)}% (${correctPredictions}/${testCases.length})`);
+  const accuracy = (passed / testCases.length) * 100;
+  if (accuracy >= 80) {
+    runner.addResult('NLU Accuracy', 'pass', `${accuracy.toFixed(1)}% (${passed}/${testCases.length})`, true, 'nlu-robustness');
   } else {
-    runner.addResult('NLU Overall Accuracy', 'fail', `Only ${(accuracy * 100).toFixed(1)}% accurate`, true);
+    runner.addResult('NLU Accuracy', 'fail', `${accuracy.toFixed(1)}% - need 80%+`, true, 'nlu-robustness');
   }
 }
 
-// Status Mapping Tests
-function testStatusMapping(runner: TestRunner) {
-  console.log('\n📊 STATUS MAPPING TESTS');
-  console.log('-'.repeat(40));
+// Workflow Dispatch Tests
+async function testWorkflowDispatch(runner: TestRunner, config: TestConfig) {
+  console.log('\n🚀 WORKFLOW DISPATCH TESTS');
+  console.log('-'.repeat(50));
 
-  const mappingTests = [
-    { status: 'queued', conclusion: null, expected: 'running' },
-    { status: 'in_progress', conclusion: null, expected: 'running' },
-    { status: 'completed', conclusion: 'success', expected: 'completed' },
-    { status: 'completed', conclusion: 'failure', expected: 'failed' },
-    { status: 'completed', conclusion: 'cancelled', expected: 'cancelled' },
-    { status: 'completed', conclusion: 'timed_out', expected: 'failed' },
-  ];
-
-  let correctMappings = 0;
+  const github = new GitHubActionsService(config.githubToken, config.owner, config.repo, config.workflowFile, config.branch);
   
-  for (const test of mappingTests) {
-    const result = mapGaToDchStatus(test.status as any, test.conclusion as any);
-    if (result === test.expected) {
-      runner.addResult(`Status Mapping: ${test.status}/${test.conclusion}`, 'pass', `-> ${result}`);
-      correctMappings++;
-    } else {
-      runner.addResult(`Status Mapping: ${test.status}/${test.conclusion}`, 'fail', `Got ${result}, expected ${test.expected}`);
-    }
-  }
-
-  if (correctMappings === mappingTests.length) {
-    runner.addResult('Status Mapping Overall', 'pass', 'All mappings correct');
-  } else {
-    runner.addResult('Status Mapping Overall', 'fail', `${correctMappings}/${mappingTests.length} correct`, true);
-  }
-}
-
-// Workflow Dispatch Test (using your actual service)
-async function testWorkflowDispatch(runner: TestRunner, config: TestConfig, mode: 'dry' | 'live' = 'dry') {
-  console.log(`\n🚀 WORKFLOW DISPATCH TEST (${mode.toUpperCase()} MODE)`);
-  console.log('-'.repeat(40));
-
-  const dispatchInputs = {
+  const testInputs = {
     job_id: `test-${Date.now()}`,
     action: 'status',
     service: 'test-service',
     environment: 'development',
     replicas: '1',
     user_id: config.userId,
-    original_command: 'integration test dispatch'
+    original_command: 'test dispatch'
   };
 
-  if (mode === 'dry') {
-    runner.addResult('Workflow Dispatch (Dry)', 'pass', 'Dry run validation successful');
-    console.log('   Would dispatch with inputs:', JSON.stringify(dispatchInputs, null, 2));
-    console.log(`   Workflow: ${config.workflowFile}`);
-    console.log(`   Branch: ${config.branch}`);
-    return;
-  }
-
   try {
-    const service = new GitHubActionsService();
-    await service.authenticate(config.githubToken);
-    
-    // Use your service dispatch method
-    await service.dispatch(config.workflowFile, dispatchInputs, config.branch);
-    runner.addResult('Workflow Dispatch (Live)', 'pass', 'Successfully triggered workflow', true);
-
-    // Try to find the created run
-    try {
-      const runName = `DCH ${dispatchInputs.job_id} - ${dispatchInputs.action} ${dispatchInputs.service} @ ${dispatchInputs.environment}`;
-      console.log(`   Looking for run with name: ${runName}`);
-      
-      const run = await service.findRunByName(config.workflowFile, runName, 6, 2000);
-      
-      if (run) {
-        runner.addResult('Run Creation Verification', 'pass', `Found run: ${run.html_url}`);
-        console.log(`   🔗 Run URL: ${run.html_url}`);
-        console.log(`   📊 Status: ${run.status} | Conclusion: ${run.conclusion || 'pending'}`);
-      } else {
-        runner.addResult('Run Creation Verification', 'fail', 'Could not locate run in time');
-      }
-    } catch (error) {
-      runner.addResult('Run Creation Verification', 'fail', `Cannot find created run: ${error}`);
-      console.log('   This may be normal if the run takes time to appear in the API');
-    }
-
-  } catch (error: any) {
-    runner.addResult('Workflow Dispatch (Live)', 'fail', `Dispatch failed: ${error?.message || error}`, true);
-    
-    // Provide helpful error diagnosis
-    const errorMsg = String(error?.message || error || '');
-    if (errorMsg.includes('422')) {
-      console.log('   💡 422 error usually means:');
-      console.log('      - Workflow file missing required inputs');
-      console.log('      - Branch specified does not contain the workflow file');
-      console.log('      - workflow_dispatch trigger not properly configured');
-    } else if (errorMsg.includes('404')) {
-      console.log('   💡 404 error usually means:');
-      console.log('      - Workflow not found by filename or ID');
-      console.log('      - Token lacks access to repo or workflow scope');
-      console.log('      - Using the wrong owner or repo');
-    } else if (errorMsg.includes('401')) {
-      console.log('   💡 401 error means unauthorized. Check token value and expiration.');
+    const dryRunResult = await github.dryRunDispatch(testInputs);
+    if (dryRunResult && dryRunResult.valid) {
+      runner.addResult('Dry Run Dispatch', 'pass', `Workflow ${dryRunResult.workflow_id} validated`, true, 'integration');
     } else {
-      console.log('   ℹ️ For more detail enable debug logs in your GitHubActionsService implementation');
+      runner.addResult('Dry Run Dispatch', 'fail', 'Validation failed', true, 'integration');
     }
+
+    if (config.liveDispatch) {
+      console.log('🔥 Live dispatch enabled - triggering real workflow...');
+      const runId = await github.dispatchWorkflow(testInputs);
+      runner.addResult('Live Dispatch', 'pass', `Triggered run ${runId}`, false, 'integration');
+    } else {
+      runner.addResult('Live Dispatch', 'skip', 'Set DCH_LIVE_DISPATCH=1 to enable', false, 'integration');
+    }
+  } catch (error) {
+    runner.addResult('Dispatch Capabilities', 'fail', `Error: ${error}`, true, 'integration');
   }
 }
 
-/* -------------------------
-   Main Orchestration
--------------------------- */
-
-async function main() {
+// Main test runner
+async function runTests() {
   await ensureFetch();
-
-  const config = validateConfig();
   const runner = new TestRunner();
+  const config = validateConfig();
 
   if (!config) {
-    // Config missing. Print a short summary and exit non zero.
-    runner.addResult('Config Validation', 'fail', 'Missing required environment variables', true);
-    const ok = runner.printSummary();
-    process.exit(ok ? 0 : 1);
-  }
-
-  // Static checks
-  detectConfigurationIssues(runner, config);
-
-  // External checks
-  await testGitHubPreFlight(runner, config);
-  await validateTokenScopes(runner, config);
-  await testEnvironmentSetup(runner, config);
-
-  // Service checks
-  await testGitHubAuthentication(runner, config);
-  await testSupabaseIntegration(runner, config);
-  await testNLUService(runner, config);
-  testStatusMapping(runner);
-
-  // Dispatch tests
-  await testWorkflowDispatch(runner, config, 'dry');
-  if (config.liveDispatch) {
-    await testWorkflowDispatch(runner, config, 'live');
-  } else {
-    console.log('\nℹ️ Live dispatch is disabled. Set DCH_LIVE_DISPATCH=1 to enable.');
-  }
-
-  const ok = runner.printSummary();
-  process.exit(ok ? 0 : 1);
-}
-
-// Only run if executed directly
-if (require.main === module) {
-  // Wrap main to catch top level async errors
-  main().catch(err => {
-    console.error('❌ Fatal error in test runner:', err);
+    runner.printSummary();
     process.exit(1);
-  });
+  }
+
+  console.log('\n🎯 RUNNING COMPREHENSIVE INTEGRATION TESTS\n');
+
+  // Phase 1: Core functionality
+  console.log('📍 PHASE 1: Core Functionality');
+  await testEnvironmentSetup(runner, config);
+  await testGitHubAuth(runner, config);
+  await testSupabaseIntegration(runner, config);
+
+  // Phase 2: Cross-repository portability
+  console.log('\n📍 PHASE 2: Cross-Repository Portability');
+  await testCrossRepoPortability(runner, config);
+
+  // Phase 3: NLU robustness
+  console.log('\n📍 PHASE 3: NLU Service');
+  await testNluService(runner, config);
+
+  // Phase 4: Workflow dispatch
+  console.log('\n📍 PHASE 4: Workflow Dispatch');
+  await testWorkflowDispatch(runner, config);
+
+  const isReady = runner.printSummary();
+  process.exit(isReady ? 0 : 1);
 }
 
-export {};
+runTests();

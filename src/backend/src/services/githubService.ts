@@ -16,16 +16,24 @@ export function mapGaToDchStatus(gaStatus: GAStatus, gaConclusion: GAConclusion)
 
 export class GitHubActionsService {
   private octokit: Octokit | null = null;
-  private owner = process.env.GH_REPO_OWNER!;
-  private repo = process.env.GH_REPO_NAME!;
-  private ref = process.env.GH_DEFAULT_REF || 'main';
+  private owner: string;
+  private repo: string;
+  private ref: string;
+  private workflowFile: string;
+
+  constructor(token?: string, owner?: string, repo?: string, workflowFile?: string, branch?: string) {
+    this.owner = owner || process.env.GH_REPO_OWNER!;
+    this.repo = repo || process.env.GH_REPO_NAME!;
+    this.ref = branch || process.env.GH_DEFAULT_REF || 'main';
+    this.workflowFile = workflowFile || 'ops.yml';
+    
+    if (token) {
+      this.octokit = new Octokit({ auth: token });
+    }
+  }
 
   async authenticate(token?: string) {
-    const authToken =
-      token ||
-      process.env.GITHUB_API_KEY ||
-      process.env.GH_TOKEN ||
-      process.env.GITHUB_TOKEN;
+    const authToken = token || process.env.GITHUB_API_KEY || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
     if (!authToken) {
       throw new Error('GitHub token not provided or set in environment');
     }
@@ -43,7 +51,76 @@ export class GitHubActionsService {
     return scopes;
   }
 
-  // Dispatch a workflow by file name (e.g., "ops.yml") with inputs
+  async getWorkflows() {
+    if (!this.octokit) {throw new Error('GitHub not authenticated');}
+    const { data } = await this.octokit.rest.actions.listRepoWorkflows({
+      owner: this.owner,
+      repo: this.repo
+    });
+    return data.workflows || [];
+  }
+
+  async getWorkflowDetails() {
+    if (!this.octokit) {throw new Error('GitHub not authenticated');}
+    try {
+      if (/^\d+$/.test(this.workflowFile)) {
+        const { data } = await this.octokit.rest.actions.getWorkflow({
+          owner: this.owner,
+          repo: this.repo,
+          workflow_id: parseInt(this.workflowFile, 10)
+        });
+        return data;
+      } else {
+        const { data } = await this.octokit.rest.actions.getWorkflow({
+          owner: this.owner,
+          repo: this.repo,
+          workflow_id: this.workflowFile
+        });
+        return data;
+      }
+    } catch (error) {
+      throw new Error(`Cannot find workflow '${this.workflowFile}': ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async dryRunDispatch(inputs: Record<string, any>) {
+    if (!this.octokit) {throw new Error('GitHub not authenticated');}
+    const workflow = await this.getWorkflowDetails();
+    if (!workflow.state || workflow.state !== 'active') {
+      throw new Error(`Workflow '${workflow.name}' is not active`);
+    }
+    return {
+      workflow_id: workflow.id,
+      workflow_name: workflow.name,
+      branch: this.ref,
+      inputs: inputs,
+      valid: true
+    };
+  }
+
+  async dispatchWorkflow(inputs: Record<string, any>) {
+    if (!this.octokit) {throw new Error('GitHub not authenticated');}
+    await this.octokit.rest.actions.createWorkflowDispatch({
+      owner: this.owner,
+      repo: this.repo,
+      workflow_id: this.workflowFile,
+      ref: this.ref,
+      inputs
+    });
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    const { data } = await this.octokit.rest.actions.listWorkflowRuns({
+      owner: this.owner,
+      repo: this.repo,
+      workflow_id: this.workflowFile,
+      event: 'workflow_dispatch',
+      per_page: 1
+    });
+    if (data.workflow_runs && data.workflow_runs.length > 0) {
+      return data.workflow_runs[0].id;
+    }
+    throw new Error('Could not find the dispatched run');
+  }
+
   async dispatch(workflowFile: string, inputs: Record<string, any>, ref = this.ref) {
     if (!this.octokit) {throw new Error('GitHub not authenticated');}
     await this.octokit.rest.actions.createWorkflowDispatch({
@@ -52,24 +129,16 @@ export class GitHubActionsService {
   }
 
   async listWorkflows() {
-    if (!this.octokit) {
-      throw new Error('GitHub not authenticated');
-    }
-    const { data } = await this.octokit.rest.actions.listRepoWorkflows({
-      owner: this.owner,
-      repo: this.repo
-    });
-    return data.workflows || [];
+    return this.getWorkflows();
   }
 
-  // Find the run we just started by its run-name ("DCH <jobId> — ...")
   async findRunByName(workflowFile: string, runName: string, tries = 12, delayMs = 1500) {
     if (!this.octokit) {throw new Error('GitHub not authenticated');}
     for (let i = 0; i < tries; i++) {
       const { data } = await this.octokit.rest.actions.listWorkflowRuns({
-        owner: this.owner, repo: this.repo, workflow_id: workflowFile, event: 'workflow_dispatch', per_page: 30
+        owner: this.owner, repo: this.repo, workflow_id: workflowFile, event: 'workflow_dispatch', per_page: 10
       });
-      const hit = data.workflow_runs?.find(r => r.name === runName);
+      const hit = data.workflow_runs?.find(r => r.name === runName || r.name?.startsWith(runName));
       if (hit) {return hit;}
       await new Promise(r => setTimeout(r, delayMs));
     }
@@ -84,7 +153,6 @@ export class GitHubActionsService {
     return data;
   }
 
-  // We'll just return the HTML logs page for simplicity; archive API returns a ZIP buffer
   getRunHtmlUrl(run: any) {
     return run?.html_url as string | undefined;
   }

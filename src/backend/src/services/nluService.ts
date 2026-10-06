@@ -1,11 +1,16 @@
 // src/backend/src/services/nluService.ts
-import path from 'path';
-import dotenv from 'dotenv';
+import path from "path";
+import fs from "fs";
+import yaml from "yaml";
+import dotenv from "dotenv";
 
-// ✅ CRITICAL FIX: Force load the same .env file as other modules
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const DEFAULT_HF_MODEL = (process.env.HF_MODEL || "facebook/bart-large-mnli").trim();
+const WORKFLOW_FILE = process.env.WORKFLOW_FILE || ".github/workflows/ops.yml";
+// The legacy api-inference.huggingface.co endpoint was retired; use the HF router.
+const HF_BASE_URL = (process.env.HF_BASE_URL || "https://router.huggingface.co/hf-inference/models").replace(/\/+$/, "");
+const HF_TIMEOUT_MS = Number(process.env.HF_TIMEOUT_MS || 8000);
 
 export type ParsedIntent = {
   action: "deploy" | "rollback" | "scale" | "restart" | "logs" | "status" | "unknown";
@@ -18,101 +23,103 @@ export type ParsedIntent = {
   error?: string;
 };
 
-function extractServiceToken(c: string): string | null {
-  // 1) Exact service-like tokens with suffix
-  const withSuffix = c.match(/\b([a-z][\w.-]{1,30}-(?:service|svc|app))\b/);
-  if (withSuffix?.[1]) {
-    return withSuffix[1].replace(/-(svc|app)$/, '-service');
+// ✅ Load service options directly from ops.yml
+function loadServicesFromOps(): string[] {
+  try {
+    // Try cwd first, then the repo root (backend usually runs from src/backend)
+    const candidates = [
+      path.resolve(process.cwd(), WORKFLOW_FILE),
+      path.resolve(__dirname, "../../../../", WORKFLOW_FILE),
+    ];
+    const wfPath = candidates.find(p => fs.existsSync(p)) ?? candidates[0];
+    const raw = fs.readFileSync(wfPath, "utf8");
+    const doc = yaml.parse(raw);
+
+    const inputs = doc?.on?.workflow_dispatch?.inputs?.service;
+    if (inputs?.options && Array.isArray(inputs.options)) {
+      const services = inputs.options.map((s: string) => s.toLowerCase().trim());
+      console.log("[NLU] Loaded services from ops.yml:", services);
+      return services;
+    }
+  } catch (err: any) {
+    console.warn("[NLU] Could not load services from ops.yml:", err.message);
   }
-  // 2) Known keywords, optionally followed by a suffix
-  const kw = c.match(/\b(api|backend|server|web|webapp|frontend|db|database|worker|auth|user|payment|notification|gateway|proxy)(?:-(?:service|svc|app))?\b/);
-  if (kw?.[0]) {
-    let tok = kw[0]
-      .replace(/\bdb\b/, 'database')              // normalize db to database
-      .replace(/-(svc|app)$/, '-service');        // normalize suffix variants
-    if (!/-service$/.test(tok)) {tok = `${tok}-service`;}
-    return tok;
+  return [];
+}
+
+const VALID_SERVICES = loadServicesFromOps();
+
+// ✅ Match user input against ops.yml service list
+function extractServiceToken(command: string): string | null {
+  if (!VALID_SERVICES.length) {return null;}
+
+  const tokens = command.toLowerCase().split(/[^a-z0-9.-]+/).filter(Boolean);
+
+  // Exact match first
+  for (const token of tokens) {
+    if (VALID_SERVICES.includes(token)) {return token;}
   }
-  // 3) Generic fallback near prepositions
-  const generic = c.match(/\b([a-z][\w.-]{1,30})\b(?=\s+(?:to|in|on|for|$))/);
-  if (generic?.[1]) {return generic[1];}
+
+  // Partial prefix/suffix match
+  for (const token of tokens) {
+    const found = VALID_SERVICES.find(s => s.startsWith(token) || s.endsWith(token));
+    if (found) {return found;}
+  }
+
   return null;
 }
 
 export function regexParse(command: string): ParsedIntent {
   const c = command.toLowerCase();
-  
-  // More comprehensive environment matching
+
+  // Match environments
   const envPatterns = [
     /\b(?:to|in|on|for)\s+(prod|production|staging|stage|dev|development|local|test|testing|qa|uat)\b/,
     /\b(prod|production|staging|stage|dev|development|local|test|testing|qa|uat)\s+(?:env|environment)\b/,
     /\benv(?:ironment)?[:=]\s*(prod|production|staging|stage|dev|development|local|test|testing|qa|uat)\b/
   ];
-  
-  let environment: string | null = null; // ✅ Fix: Explicit type annotation
+  let environment: string | null = null;
   for (const pattern of envPatterns) {
     const match = c.match(pattern);
-    if (match?.[1]) {
-      environment = match[1];
-      break;
-    }
+    if (match?.[1]) { environment = match[1]; break; }
   }
-  
-  // Use new service extraction function
-  let service: string | null = extractServiceToken(c);
-  
-  // Enhanced replicas matching
+
+  const service = extractServiceToken(c);
+
+  // Replicas
   const replicaPatterns = [
     /(\d+)\s*(?:replica|replicas|pods?|instances?)\b/,
     /\bto\s+(\d+)\s*(?:replica|replicas|pods?|instances?)?\b/,
     /\breplica(?:s|count)?[:=]\s*(\d+)\b/,
     /\bscale\b[^\d]*(\d+)\b/
   ];
-  
-  let replicas: number | undefined = undefined; // ✅ Fix: Explicit type annotation
+  let replicas: number | undefined = undefined;
   for (const pattern of replicaPatterns) {
     const match = c.match(pattern);
     if (match?.[1]) {
       const num = Number(match[1]);
-      if (num >= 0 && num <= 100) {
-        replicas = num;
-        break;
-      }
+      if (num >= 0 && num <= 100) { replicas = num; break; }
     }
   }
-  
-  // Enhanced action detection with better precedence
+
+  // Action detection
   const actionPatterns = [
-    { pattern: /\b(?:roll\s*back|rollback)\b/, action: 'rollback' as const },
-    { pattern: /\bscale\b|\breplica\b|\bautoscal\b/, action: 'scale' as const },
-    { pattern: /\brestart\b|\breboot\b|\breload\b/, action: 'restart' as const },
-    { pattern: /\blog\b|\blogs\b|\btail\b/, action: 'logs' as const },
-    { pattern: /\bstatus\b|\bhealth\b|\bping\b|\bcheck\b/, action: 'status' as const },
-    { pattern: /\bdeploy\b|\brelease\b|\bship\b|\bpush\b/, action: 'deploy' as const }
+    { pattern: /\b(?:roll\s*back|rollback)\b/, action: "rollback" as const },
+    { pattern: /\bscale\b|\breplica\b|\bautoscal\b/, action: "scale" as const },
+    { pattern: /\brestart\b|\breboot\b|\breload\b/, action: "restart" as const },
+    { pattern: /\blog\b|\blogs\b|\btail\b/, action: "logs" as const },
+    { pattern: /\bstatus\b|\bhealth\b|\bping\b|\bcheck\b/, action: "status" as const },
+    { pattern: /\bdeploy\b|\brelease\b|\bship\b|\bpush\b/, action: "deploy" as const }
   ];
-  
   let action: ParsedIntent["action"] = "unknown";
   for (const { pattern, action: act } of actionPatterns) {
-    if (pattern.test(c)) {
-      action = act;
-      break;
-    }
+    if (pattern.test(c)) { action = act; break; }
   }
-  
-  return {
-    action,
-    environment,
-    service,
-    replicas,
-    confidence: 0.5,
-    source: "regex",
-  };
+
+  return { action, environment, service, replicas, confidence: 0.5, source: "regex" };
 }
 
-
 const ACTIONS = ["deploy","rollback","scale","restart","logs","status"] as const;
-
-// Replace the ACTION_HYPOTHESES in your nluService.ts with these more specific ones:
 
 const ACTION_HYPOTHESES = [
   { action: "deploy",   hypothesis: "This is a request to deploy, ship, release, or push code to a service or environment." },
@@ -123,7 +130,6 @@ const ACTION_HYPOTHESES = [
   { action: "status",   hypothesis: "This is a request to check the status, health, or state of a service or system." },
 ] as const;
 
-// Also update the ZERO_SHOT_LABELS to be more specific:
 const ZERO_SHOT_LABELS = [
   { action: "deploy",   label: "deploy or release code" },
   { action: "rollback", label: "rollback or revert deployment" },
@@ -147,6 +153,7 @@ async function fetchJson(url: string, body: any, apiKey: string) {
       "Accept": "application/json",
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(HF_TIMEOUT_MS),
   });
   const text = await res.text();
   let json: any = null;
@@ -159,15 +166,13 @@ async function fetchJson(url: string, body: any, apiKey: string) {
 }
 
 async function nliEntailmentScore(premise: string, hypothesis: string, apiKey: string, model: string): Promise<number> {
-  const url = `https://api-inference.huggingface.co/models/${model}`;
-  // Try structured pair first
+  const url = `${HF_BASE_URL}/${model}`;
   let data = await fetchJson(url, {
     inputs: { text: premise, text_pair: hypothesis },
     parameters: { return_all_scores: true },
     options: { wait_for_model: true, use_cache: true },
   }, apiKey);
 
-  // Defensive fallback to Roberta separator format if needed
   if (!Array.isArray(data)) {
     data = await fetchJson(url, {
       inputs: `${premise} </s></s> ${hypothesis}`,
@@ -184,41 +189,35 @@ async function nliEntailmentScore(premise: string, hypothesis: string, apiKey: s
 }
 
 async function zeroShotScores(input: string, apiKey: string, model: string) {
-  const url = `https://api-inference.huggingface.co/models/${model}`;
+  const url = `${HF_BASE_URL}/${model}`;
   const labels = ZERO_SHOT_LABELS.map(z => z.label);
   const data = await fetchJson(url, {
     inputs: input,
-    parameters: {
-      candidate_labels: labels,
-      hypothesis_template: "The user wants to {}.",
-      multi_label: false,
-    },
+    parameters: { candidate_labels: labels, hypothesis_template: "The user wants to {}.", multi_label: false },
     options: { wait_for_model: true, use_cache: true },
   }, apiKey);
 
   const out: Array<{ action: typeof ACTIONS[number]; score: number; label: string }> = [];
-  if (Array.isArray(data?.labels) && Array.isArray(data?.scores)) {
-    for (let i = 0; i < data.labels.length; i++) {
-      const lbl = data.labels[i];
-      const sc = data.scores[i] ?? 0;
-      const mapped = ZERO_SHOT_LABELS.find(z => z.label === lbl);
-      if (mapped) {out.push({ action: mapped.action, score: sc, label: lbl });}
-    }
+  // Router format: [{ label, score }]; legacy format: { labels: [], scores: [] }
+  const pairs: Array<{ label: string; score: number }> =
+    Array.isArray(data) ? data :
+    Array.isArray(data?.labels) ? data.labels.map((label: string, i: number) => ({ label, score: data.scores?.[i] ?? 0 })) :
+    [];
+  for (const { label, score } of pairs) {
+    const mapped = ZERO_SHOT_LABELS.find(z => z.label === label);
+    if (mapped) {out.push({ action: mapped.action, score: score ?? 0, label });}
   }
   out.sort((a,b) => b.score - a.score);
   return out;
 }
 
-export async function parseCommand(opts: {
-  command: string;
-  hfApiKey: string | null;
-  confidenceThreshold?: number;
-}): Promise<ParsedIntent> {
+export async function parseCommand(opts: { command: string; hfApiKey: string | null; confidenceThreshold?: number; }): Promise<ParsedIntent> {
   const { command, hfApiKey, confidenceThreshold = 0.7 } = opts;
-  const coarse = regexParse(command);
+  const normalized = command.toLowerCase().trim();
+  const coarse = regexParse(normalized);
 
   if (!hfApiKey) {
-    console.log('[NLU] No HF API key provided, using regex fallback');
+    console.log("[NLU] No HF API key provided, using regex fallback");
     return { ...coarse, source: "regex" };
   }
 
@@ -229,45 +228,53 @@ export async function parseCommand(opts: {
     let ranked: Array<{ action: typeof ACTIONS[number]; score: number; detail?: unknown }> = [];
 
     if (isZeroShotModel(model)) {
-      console.log('[NLU] Using zero-shot classification');
-      const z = await zeroShotScores(command, hfApiKey, model);
+      console.log("[NLU] Using zero-shot classification");
+      const z = await zeroShotScores(normalized, hfApiKey, model);
       ranked = z.map(({ action, score, label }) => ({ action, score, detail: { label } }));
-      console.log(`[NLU] Zero-shot results:`, ranked.slice(0, 3));
+      console.log("[NLU] Zero-shot results:", ranked.slice(0, 3));
     } else {
-      console.log('[NLU] Using NLI classification');
+      console.log("[NLU] Using NLI classification");
       const scores = await Promise.all(
         ACTION_HYPOTHESES.map(async h => ({
           action: h.action,
-          score: await nliEntailmentScore(command, h.hypothesis, hfApiKey, model),
+          score: await nliEntailmentScore(normalized, h.hypothesis, hfApiKey, model),
           detail: { hypothesis: h.hypothesis },
         }))
       );
       scores.sort((a,b) => b.score - a.score);
       ranked = scores;
-      console.log(`[NLU] NLI results:`, ranked.slice(0, 3));
+      console.log("[NLU] NLI results:", ranked.slice(0, 3));
     }
 
     const top = ranked[0];
     const accept = (top?.score ?? 0) >= confidenceThreshold;
-    
-    console.log(`[NLU] Top result: ${top?.action} (${top?.score?.toFixed(3)}), accept: ${accept}`);
 
+    if (accept) {
+      // Pick the top action, even if other actions are also above the threshold.
+      return {
+        action: top.action,
+        environment: coarse.environment,
+        service: coarse.service,
+        replicas: coarse.replicas,
+        confidence: Number((top.score ?? 0).toFixed(3)),
+        source: `hf:${model}`,
+        debug: { model, threshold: confidenceThreshold, rankedActions: ranked.slice(0, 6), validServices: VALID_SERVICES },
+      };
+    }
+
+    // Fallback to regex if the top score is below the threshold.
+    // The "regex-fallback" source serves as a flag for low confidence.
     return {
-      action: accept ? top.action : coarse.action,   // was "unknown"
+      action: coarse.action,
       environment: coarse.environment,
       service: coarse.service,
       replicas: coarse.replicas,
       confidence: Number((top?.score ?? 0).toFixed(3)),
-      source: accept ? `hf:${model}` : "regex-fallback",
-      debug: { model, threshold: confidenceThreshold, isZeroShot: isZeroShotModel(model), rankedActions: ranked.slice(0, 6) },
+      source: "regex-fallback",
+      debug: { model, threshold: confidenceThreshold, rankedActions: ranked.slice(0, 6), validServices: VALID_SERVICES },
     };
   } catch (err: any) {
-    console.error('[NLU] HF API error:', err.message);
-    return { 
-      ...coarse, 
-      source: "regex-error-fallback", 
-      error: String(err), 
-      debug: { model } 
-    };
+    console.error("[NLU] HF API error:", err.message);
+    return { ...coarse, source: "regex-error-fallback", error: String(err), debug: { model } };
   }
 }

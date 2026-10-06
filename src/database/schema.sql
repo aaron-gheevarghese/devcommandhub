@@ -1,13 +1,10 @@
 -- DevCommandHub Jobs Table Schema - CLEAN VERSION
 -- Fixed all typos and syntax errors
 
--- Enable UUID extension if not already enabled
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 -- Jobs table for DevCommandHub
 CREATE TABLE IF NOT EXISTS jobs (
   -- Primary identification
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
   
   -- Command details
@@ -49,7 +46,12 @@ CREATE INDEX IF NOT EXISTS idx_jobs_external_id ON jobs(external_job_id);
 -- Row Level Security (RLS)
 ALTER TABLE jobs ENABLE ROW LEVEL SECURITY;
 
--- RLS Policies
+-- RLS Policies (the backend uses the service-role key, which bypasses RLS)
+DROP POLICY IF EXISTS "Users can view own jobs" ON jobs;
+DROP POLICY IF EXISTS "Users can insert own jobs" ON jobs;
+DROP POLICY IF EXISTS "Users can update own jobs" ON jobs;
+DROP POLICY IF EXISTS "Users can delete own jobs" ON jobs;
+
 CREATE POLICY "Users can view own jobs" ON jobs
   FOR SELECT USING (auth.uid() = user_id);
 
@@ -71,6 +73,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS update_jobs_updated_at ON jobs;
 CREATE TRIGGER update_jobs_updated_at 
   BEFORE UPDATE ON jobs 
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
@@ -94,3 +97,13 @@ BEGIN
   RETURNING *;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Used by GET /debug/role and scripts/createTestUser.cjs to confirm the backend key is service_role
+CREATE OR REPLACE FUNCTION public.debug_auth()
+RETURNS json AS $$
+  SELECT json_build_object(
+    'role', auth.role(),
+    'uid', auth.uid(),
+    'jwt_present', current_setting('request.jwt.claims', true) IS NOT NULL
+  );
+$$ LANGUAGE sql STABLE;
