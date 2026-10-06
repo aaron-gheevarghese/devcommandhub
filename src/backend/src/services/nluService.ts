@@ -8,7 +8,6 @@ import { commandParser } from "./commandParser";
 dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const DEFAULT_HF_MODEL = (process.env.HF_MODEL || "facebook/bart-large-mnli").trim();
-const WORKFLOW_FILE = process.env.WORKFLOW_FILE || ".github/workflows/ops.yml";
 // The legacy api-inference.huggingface.co endpoint was retired; use the HF router.
 const HF_BASE_URL = (process.env.HF_BASE_URL || "https://router.huggingface.co/hf-inference/models").replace(/\/+$/, "");
 const HF_TIMEOUT_MS = Number(process.env.HF_TIMEOUT_MS || 8000);
@@ -34,30 +33,6 @@ type Action = Exclude<ParsedIntent["action"], "unknown">;
 /** "unknown" = the model's out-of-scope label */
 export type RankedAction = { action: ParsedIntent["action"]; score: number };
 
-// ✅ Load service options directly from ops.yml
-function loadServicesFromOps(): string[] {
-  try {
-    // Try cwd first, then the repo root (backend usually runs from src/backend)
-    const candidates = [
-      path.resolve(process.cwd(), WORKFLOW_FILE),
-      path.resolve(__dirname, "../../../../", WORKFLOW_FILE),
-    ];
-    const wfPath = candidates.find(p => fs.existsSync(p)) ?? candidates[0];
-    const raw = fs.readFileSync(wfPath, "utf8");
-    const doc = yaml.parse(raw);
-
-    const inputs = doc?.on?.workflow_dispatch?.inputs?.service;
-    if (inputs?.options && Array.isArray(inputs.options)) {
-      const services = inputs.options.map((s: string) => s.toLowerCase().trim());
-      console.log("[NLU] Loaded services from ops.yml:", services);
-      return services;
-    }
-  } catch (err: any) {
-    console.warn("[NLU] Could not load services from ops.yml:", err.message);
-  }
-  return [];
-}
-
 /** Services declared in this repo's .devcommandhub.yml (fallback when the client sends none). */
 function loadServicesFromConfig(): string[] {
   try {
@@ -68,7 +43,7 @@ function loadServicesFromConfig(): string[] {
   }
 }
 
-const VALID_SERVICES = [...new Set([...loadServicesFromOps(), ...loadServicesFromConfig()])];
+const VALID_SERVICES = loadServicesFromConfig();
 
 // ✅ Match user input against ops.yml service list
 function extractServiceToken(command: string, services: string[] = VALID_SERVICES): string | null {
