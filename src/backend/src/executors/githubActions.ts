@@ -85,15 +85,17 @@ export const githubActionsExecutor: Executor = {
       await sleep(POLL_MS, signal);
     }
 
+    let failureReason: string | undefined;
     try {
       const lines = extractDchLines(await gh.getRunLogs(run.id));
       if (lines.length) {ctx.log('', '--- kubectl output ---', ...lines);}
+      failureReason = [...lines].reverse().find(l => l.startsWith('❌'))?.replace(/^❌\s*/, '');
     } catch (e: any) {
       ctx.log(`(could not fetch run logs: ${e.message})`);
     }
 
     const final = mapGaToDchStatus(current.status as any, current.conclusion as any);
     if (final === 'completed') {return { success: true };}
-    return { success: false, error: `Workflow run ${current.conclusion ?? 'failed'}: ${url}` };
+    return { success: false, error: failureReason ?? `Workflow run ${current.conclusion ?? 'failed'}: ${url}` };
   },
 };
