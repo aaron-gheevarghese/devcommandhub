@@ -23,6 +23,7 @@ interface JobResponse {
   };
   status: string;
   created_at: string;
+  execution_method?: string;
 }
 
 interface JobDetails {
@@ -33,6 +34,9 @@ interface JobDetails {
   status: string;
   output?: string[];
   error_message?: string;
+  external_url?: string;
+  execution_mode?: string;
+  cancel_requested?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -217,7 +221,7 @@ class DevCommandHubProvider implements vscode.Disposable {
   private getNluSettings(): { enableNLU: boolean; confidenceThreshold: number; userId?: string } {
     const cfg = vscode.workspace.getConfiguration('devcommandhub');
     const enableNLU = cfg.get<boolean>('enableNLU', true);
-    const confidenceThreshold = cfg.get<number>('confidenceThreshold', 0.6);
+    const confidenceThreshold = cfg.get<number>('confidenceThreshold', 0.4);
     const userId = cfg.get<string>('userId', '')?.trim() || undefined;
     return { enableNLU, confidenceThreshold, userId };
   }
@@ -283,6 +287,9 @@ class DevCommandHubProvider implements vscode.Disposable {
           break;
         case 'refreshJob':
           if (message.jobId) { await this.refreshJobStatus(message.jobId); }
+          break;
+        case 'cancelJob':
+          if (message.jobId) { await this.cancelJob(message.jobId); }
           break;
         case 'retryJob':
           if (!message.originalCommand) { break; }
@@ -354,6 +361,7 @@ class DevCommandHubProvider implements vscode.Disposable {
         parsed_intent: response.parsed_intent,
         status: response.status,
         created_at: response.created_at,
+        execution_method: response.execution_method,
         original_command: command
       };
 
@@ -395,40 +403,6 @@ class DevCommandHubProvider implements vscode.Disposable {
   // Handle API error responses with user-friendly dialogs
   private async handleApiError(res: Response, data: any, command: string): Promise<any> {
     if (res.status === 422) {
-      if (data?.code === 'LOW_CONFIDENCE' && data?.suggested_action) {
-        const choice = await vscode.window.showWarningMessage(
-          data.message,
-          `Use "${data.suggested_action}"`,
-          'Try different command',
-          'Cancel'
-        );
-
-        if (choice === `Use "${data.suggested_action}"`) {
-          const retryBody = {
-            command,
-            enableNLU: true,
-            clientHints: parseClientHints(command),
-            user_id: this.getStableUserId(),
-            slotOverrides: { action: data.suggested_action }
-          };
-
-          const retryRes = await fetch(`${this.getApiBaseUrl()}/api/commands`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...this.getHFHeaders() },
-            body: JSON.stringify(retryBody),
-          });
-
-          if (!retryRes.ok) {
-            const retryData = await retryRes.json().catch(() => ({}));
-            throw new Error(`Retry failed: ${retryRes.status} — ${JSON.stringify(retryData)}`);
-          }
-
-          return retryRes.json();
-        } else {
-          throw new Error('Command unclear - please try a different command');
-        }
-      }
-
       if (data?.code === 'UNCLEAR_COMMAND' && data?.examples) {
         const choice = await vscode.window.showWarningMessage(
           data.message,
@@ -454,7 +428,7 @@ class DevCommandHubProvider implements vscode.Disposable {
     throw new Error(`API request failed: ${res.status} ${res.statusText} — ${JSON.stringify(data)}`);
   }
 
-  private async startJobPolling(jobId: string, maxAttempts: number = 60) {
+  private async startJobPolling(jobId: string, maxAttempts: number = 220) {
     if (this.pollingJobs.has(jobId)) {
       console.log(`[DCH] Already polling job ${jobId}`);
       return;
@@ -483,7 +457,9 @@ class DevCommandHubProvider implements vscode.Disposable {
           status: job.status,
           output: job.output,
           error_message: job.error_message,
-          original_command: job.original_command
+          original_command: job.original_command,
+          external_url: job.external_url,
+          cancel_requested: job.cancel_requested
         });
 
         const terminalStates = ['completed', 'failed', 'cancelled'];
@@ -540,6 +516,20 @@ class DevCommandHubProvider implements vscode.Disposable {
     setTimeout(poll, 2000);
   }
 
+  private async cancelJob(jobId: string) {
+    try {
+      const res = await fetch(`${this.getApiBaseUrl()}/api/jobs/${jobId}/cancel`, { method: 'POST' });
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) { throw new Error(data?.message || `${res.status} ${res.statusText}`); }
+      vscode.window.showInformationMessage(
+        data.result === 'cancelled' ? 'Job cancelled.' : 'Cancellation requested; the worker is stopping the job.'
+      );
+      await this.refreshJobStatus(jobId);
+    } catch (error) {
+      this.showErrorToast(`Cancel failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
   // Refresh job status and update the webview
   private async refreshJobStatus(jobId: string) {
     if (!this.panel) { return; }
@@ -551,7 +541,9 @@ class DevCommandHubProvider implements vscode.Disposable {
         status: job.status,
         output: job.output,
         error_message: job.error_message,
-        original_command: job.original_command
+        original_command: job.original_command,
+        external_url: job.external_url,
+        cancel_requested: job.cancel_requested
       });
       const terminalStates = ['completed', 'failed', 'cancelled'];
       if (!terminalStates.includes(job.status)) {
@@ -670,23 +662,9 @@ private async sendCommandToAPI(
             throw new Error('User cancelled slot filling');
           }
 
-          const retryBody = {
-            ...body,
+          return this.sendCommandToAPI(command, {
             slotOverrides: { ...(body.slotOverrides || {}), action: String(action).toLowerCase() },
-          };
-
-          const retryRes = await fetch(`${apiBase}/api/commands`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(retryBody),
           });
-
-          if (!retryRes.ok) {
-            const err = await retryRes.text();
-            throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
-          }
-
-          return retryRes.json();
         }
 
         // --- SERVICE slot ---
@@ -747,23 +725,9 @@ private async sendCommandToAPI(
             throw new Error('User cancelled slot filling');
           }
 
-          const retryBody = {
-            ...body,
+          return this.sendCommandToAPI(command, {
             slotOverrides: { ...(body.slotOverrides || {}), service },
-          };
-
-          const retryRes = await fetch(`${apiBase}/api/commands`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(retryBody),
           });
-
-          if (!retryRes.ok) {
-            const err = await retryRes.text();
-            throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
-          }
-
-          return retryRes.json();
         }
 
         // --- REPLICAS slot ---
@@ -784,26 +748,12 @@ private async sendCommandToAPI(
             throw new Error('User cancelled slot filling');
           }
 
-          const retryBody = {
-            ...body,
+          return this.sendCommandToAPI(command, {
             slotOverrides: {
               ...(body.slotOverrides || {}),
               replicas: parseInt(replicaCount, 10),
             },
-          };
-
-          const retryRes = await fetch(`${apiBase}/api/commands`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(retryBody),
           });
-
-          if (!retryRes.ok) {
-            const err = await retryRes.text();
-            throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
-          }
-
-          return retryRes.json();
         }
 
         // --- ENVIRONMENT slot ---
@@ -833,24 +783,28 @@ private async sendCommandToAPI(
             throw new Error('User cancelled slot filling');
           }
 
-          const retryBody = {
-            ...body,
+          return this.sendCommandToAPI(command, {
             slotOverrides: { ...(body.slotOverrides || {}), environment },
-          };
-
-          const retryRes = await fetch(`${apiBase}/api/commands`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(retryBody),
           });
-
-          if (!retryRes.ok) {
-            const err = await retryRes.text();
-            throw new Error(`API request failed (retry): ${retryRes.status} — ${err}`);
-          }
-
-          return retryRes.json();
         }
+      }
+
+      // ---- Low confidence: never run a guess; let the user pick the action ----
+      if (res.status === 422 && data?.code === 'LOW_CONFIDENCE') {
+        const candidates: Array<{ action: string; score: number }> = data.candidates || [];
+        const all = ['deploy', 'scale', 'logs', 'restart', 'rollback', 'status'];
+        const items = [
+          ...candidates.map(c => ({ label: c.action, description: `${Math.round(c.score * 100)}% model confidence` })),
+          ...all.filter(a => !candidates.some(c => c.action === a)).map(a => ({ label: a, description: '' })),
+        ];
+        const picked = await vscode.window.showQuickPick(items, {
+          title: 'Confirm action',
+          placeHolder: data.message || 'Which action did you mean?',
+        });
+        if (!picked) { throw new Error('Command not run: action not confirmed'); }
+        return this.sendCommandToAPI(command, {
+          slotOverrides: { ...(body.slotOverrides || {}), action: picked.label },
+        });
       }
 
       // Use handleApiError for other error cases
@@ -1098,7 +1052,7 @@ private getControllerScript(nonce: string): string {
       var m = ev.data || {};
       if (m.command === 'showTyping') return showTyping();
       if (m.command === 'addDevResponse') { hideTyping(); return addDevResponse(m.response); }
-      if (m.command === 'updateJobStatus') return updateJobStatusInChat(m.jobId, m.status, m.output, m.error_message, m.original_command);
+      if (m.command === 'updateJobStatus') return updateJobStatusInChat(m.jobId, m.status, m.output, m.error_message, m.original_command, m.external_url, m.cancel_requested);
       if (m.command === 'setLoadingState') return setLoadingState(m.loading);
       if (m.command === 'showPollingError') return showPollingError(m.jobId, m.message);
       if (m.command === 'showBusyMessage') return showBusyMessage(m.message);
@@ -1166,7 +1120,9 @@ private getControllerScript(nonce: string): string {
           ? '<strong>Replicas:</strong> ' + resp.parsed_intent.replicas + '<br>'
           : '') +
         '<strong>Created:</strong> ' + new Date(resp.created_at).toLocaleString() + '<br>' +
-        '<div style="margin-top:8px;"><button class="action-btn refresh-btn" id="refresh-' + resp.job_id + '">🔄 Refresh</button></div>';
+        '<strong>Runs on:</strong> ' + (resp.execution_method || 'simulation') + '<br>' +
+        '<div style="margin-top:8px;"><button class="action-btn refresh-btn" id="refresh-' + resp.job_id + '">🔄 Refresh</button> ' +
+        '<button class="action-btn cancel-btn" id="cancel-' + resp.job_id + '">⛔ Cancel</button></div>';
 
       body.setAttribute('data-job-id', resp.job_id || '');
       body.setAttribute('data-original-command', resp.original_command || '');
@@ -1175,6 +1131,11 @@ private getControllerScript(nonce: string): string {
         var btn = document.getElementById('refresh-' + resp.job_id);
         if (btn) btn.addEventListener('click', function(){
           if (window.vscode) window.vscode.postMessage({ command: 'refreshJob', jobId: resp.job_id });
+        });
+        var cbtn = document.getElementById('cancel-' + resp.job_id);
+        if (cbtn) cbtn.addEventListener('click', function(){
+          cbtn.disabled = true;
+          if (window.vscode) window.vscode.postMessage({ command: 'cancelJob', jobId: resp.job_id });
         });
       }, 0);
 
@@ -1201,17 +1162,33 @@ private getControllerScript(nonce: string): string {
     cc.scrollTop = cc.scrollHeight;
   }
 
-  function updateJobStatusInChat(jobId, status, output, errorMessage, originalCommand) {
+  function updateJobStatusInChat(jobId, status, output, errorMessage, originalCommand, externalUrl, cancelRequested) {
     var item = document.querySelector('[data-job-id="' + jobId + '"]');
     if (!item) return;
 
+    var terminal = status === 'completed' || status === 'failed' || status === 'cancelled';
     var badge = item.querySelector('.status-badge');
-    if (badge) { badge.textContent = status; badge.className = 'status-badge ' + status; }
+    if (badge) {
+      badge.textContent = (cancelRequested && !terminal) ? 'cancelling' : status;
+      badge.className = 'status-badge ' + status;
+    }
+
+    var cancelBtn = document.getElementById('cancel-' + jobId);
+    if (cancelBtn && (terminal || cancelRequested)) cancelBtn.style.display = 'none';
 
     var content = item.querySelector('.bot-message-content');
     if (!content) return;
 
-    content.querySelectorAll('.output-section, .error-section, .retry-section').forEach(function(n){ n.remove(); });
+    content.querySelectorAll('.output-section, .error-section, .retry-section, .run-link').forEach(function(n){ n.remove(); });
+
+    if (externalUrl && /^https:\/\/github\.com\//.test(externalUrl)) {
+      var link = document.createElement('div');
+      link.className = 'run-link';
+      var a = document.createElement('a');
+      a.href = externalUrl; a.textContent = '🔗 View GitHub Actions run';
+      link.appendChild(a);
+      content.appendChild(link);
+    }
 
     if (output && output.length) {
       var o = document.createElement('div');

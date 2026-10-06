@@ -1,0 +1,552 @@
+[
+ {
+  "text": "deploy frontend to staging",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "deploy api",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "ship the api to production",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "push the latest frontend build to prod",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "release api v2 to staging",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "can you deploy the frontend to dev",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "roll out the new api version to production",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "get the latest code for frontend live on staging",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "deploy api to qa please",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "put the newest frontend on production",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "let's ship frontend",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "publish the api changes to the staging environment",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "we need the new api build deployed to dev",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "go live with the frontend",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "promote api to production",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "deplyo frontend to staging",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "update the api in staging with the latest commit",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "kick off a deployment of the frontend",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "release the frontend",
+  "action": "deploy",
+  "split": "dev"
+ },
+ {
+  "text": "can u push api to prod",
+  "action": "deploy",
+  "split": "test"
+ },
+ {
+  "text": "rollback api",
+  "action": "rollback",
+  "split": "dev"
+ },
+ {
+  "text": "roll back the frontend in production",
+  "action": "rollback",
+  "split": "test"
+ },
+ {
+  "text": "revert the last api deploy",
+  "action": "rollback",
+  "split": "dev"
+ },
+ {
+  "text": "undo the frontend deployment",
+  "action": "rollback",
+  "split": "test"
+ },
+ {
+  "text": "the new api release is broken, go back to the previous version",
+  "action": "rollback",
+  "split": "dev"
+ },
+ {
+  "text": "rollback frontend to the last good version",
+  "action": "rollback",
+  "split": "test"
+ },
+ {
+  "text": "revert api in staging",
+  "action": "rollback",
+  "split": "dev"
+ },
+ {
+  "text": "take the frontend back to yesterday's build",
+  "action": "rollback",
+  "split": "test"
+ },
+ {
+  "text": "roll the api back",
+  "action": "rollback",
+  "split": "dev"
+ },
+ {
+  "text": "undo whatever we just shipped to api",
+  "action": "rollback",
+  "split": "test"
+ },
+ {
+  "text": "restore the previous api release",
+  "action": "rollback",
+  "split": "dev"
+ },
+ {
+  "text": "rolback frontend",
+  "action": "rollback",
+  "split": "test"
+ },
+ {
+  "text": "downgrade api to the prior version",
+  "action": "rollback",
+  "split": "dev"
+ },
+ {
+  "text": "back out the frontend change in prod",
+  "action": "rollback",
+  "split": "test"
+ },
+ {
+  "text": "the deploy broke prod, revert the api",
+  "action": "rollback",
+  "split": "dev"
+ },
+ {
+  "text": "scale api to 3 replicas",
+  "action": "scale",
+  "split": "dev"
+ },
+ {
+  "text": "scale frontend to 5",
+  "action": "scale",
+  "split": "test"
+ },
+ {
+  "text": "increase api replicas to 4",
+  "action": "scale",
+  "split": "dev"
+ },
+ {
+  "text": "scale down the frontend to 1 instance",
+  "action": "scale",
+  "split": "test"
+ },
+ {
+  "text": "we need more capacity on the api, bump it to 6 pods",
+  "action": "scale",
+  "split": "dev"
+ },
+ {
+  "text": "add more frontend instances, make it 3",
+  "action": "scale",
+  "split": "test"
+ },
+ {
+  "text": "set api replicas to 2",
+  "action": "scale",
+  "split": "dev"
+ },
+ {
+  "text": "reduce the frontend to 0 replicas",
+  "action": "scale",
+  "split": "test"
+ },
+ {
+  "text": "run 4 copies of the api in staging",
+  "action": "scale",
+  "split": "dev"
+ },
+ {
+  "text": "scale up api",
+  "action": "scale",
+  "split": "test"
+ },
+ {
+  "text": "resize frontend to 2 pods",
+  "action": "scale",
+  "split": "dev"
+ },
+ {
+  "text": "can you make the api run on 8 instances",
+  "action": "scale",
+  "split": "test"
+ },
+ {
+  "text": "bump frontend to 3 replicas in prod",
+  "action": "scale",
+  "split": "dev"
+ },
+ {
+  "text": "shrink the api down to 1 replica",
+  "action": "scale",
+  "split": "test"
+ },
+ {
+  "text": "autoscale api to 5",
+  "action": "scale",
+  "split": "dev"
+ },
+ {
+  "text": "restart api",
+  "action": "restart",
+  "split": "dev"
+ },
+ {
+  "text": "restart the frontend in staging",
+  "action": "restart",
+  "split": "test"
+ },
+ {
+  "text": "reboot the api",
+  "action": "restart",
+  "split": "dev"
+ },
+ {
+  "text": "bounce the frontend pods",
+  "action": "restart",
+  "split": "test"
+ },
+ {
+  "text": "api is stuck, restart it",
+  "action": "restart",
+  "split": "dev"
+ },
+ {
+  "text": "can you restart api in prod",
+  "action": "restart",
+  "split": "test"
+ },
+ {
+  "text": "cycle the frontend pods",
+  "action": "restart",
+  "split": "dev"
+ },
+ {
+  "text": "reload the api service",
+  "action": "restart",
+  "split": "test"
+ },
+ {
+  "text": "give the frontend a restart",
+  "action": "restart",
+  "split": "dev"
+ },
+ {
+  "text": "kill and recreate the api pods",
+  "action": "restart",
+  "split": "test"
+ },
+ {
+  "text": "restart frontend please",
+  "action": "restart",
+  "split": "dev"
+ },
+ {
+  "text": "the api is hanging, kick it",
+  "action": "restart",
+  "split": "test"
+ },
+ {
+  "text": "do a rolling restart of the api",
+  "action": "restart",
+  "split": "dev"
+ },
+ {
+  "text": "restart everything for frontend in dev",
+  "action": "restart",
+  "split": "test"
+ },
+ {
+  "text": "power cycle the api",
+  "action": "restart",
+  "split": "dev"
+ },
+ {
+  "text": "show logs for api",
+  "action": "logs",
+  "split": "dev"
+ },
+ {
+  "text": "logs frontend last 50",
+  "action": "logs",
+  "split": "test"
+ },
+ {
+  "text": "tail the api logs",
+  "action": "logs",
+  "split": "dev"
+ },
+ {
+  "text": "what are the recent logs for the frontend",
+  "action": "logs",
+  "split": "test"
+ },
+ {
+  "text": "show me the last 100 lines of api logs",
+  "action": "logs",
+  "split": "dev"
+ },
+ {
+  "text": "get logs from frontend in staging",
+  "action": "logs",
+  "split": "test"
+ },
+ {
+  "text": "why is the api erroring, show me the logs",
+  "action": "logs",
+  "split": "dev"
+ },
+ {
+  "text": "print the frontend output",
+  "action": "logs",
+  "split": "test"
+ },
+ {
+  "text": "fetch api logs",
+  "action": "logs",
+  "split": "dev"
+ },
+ {
+  "text": "let me see what the frontend has been logging",
+  "action": "logs",
+  "split": "test"
+ },
+ {
+  "text": "logs api",
+  "action": "logs",
+  "split": "dev"
+ },
+ {
+  "text": "dump the last 20 log lines for api",
+  "action": "logs",
+  "split": "test"
+ },
+ {
+  "text": "view frontend logs in production",
+  "action": "logs",
+  "split": "dev"
+ },
+ {
+  "text": "stream the api logs",
+  "action": "logs",
+  "split": "test"
+ },
+ {
+  "text": "check the api log output",
+  "action": "logs",
+  "split": "dev"
+ },
+ {
+  "text": "status of api",
+  "action": "status",
+  "split": "dev"
+ },
+ {
+  "text": "is the frontend healthy",
+  "action": "status",
+  "split": "test"
+ },
+ {
+  "text": "check the health of api",
+  "action": "status",
+  "split": "dev"
+ },
+ {
+  "text": "how is the api doing in production",
+  "action": "status",
+  "split": "test"
+ },
+ {
+  "text": "is frontend up",
+  "action": "status",
+  "split": "dev"
+ },
+ {
+  "text": "what's the status of the api in staging",
+  "action": "status",
+  "split": "test"
+ },
+ {
+  "text": "are all frontend pods running",
+  "action": "status",
+  "split": "dev"
+ },
+ {
+  "text": "health check api",
+  "action": "status",
+  "split": "test"
+ },
+ {
+  "text": "how many replicas is the api running right now",
+  "action": "status",
+  "split": "dev"
+ },
+ {
+  "text": "status frontend",
+  "action": "status",
+  "split": "test"
+ },
+ {
+  "text": "is the api deployment ready",
+  "action": "status",
+  "split": "dev"
+ },
+ {
+  "text": "give me a status report on frontend",
+  "action": "status",
+  "split": "test"
+ },
+ {
+  "text": "is anything wrong with the api",
+  "action": "status",
+  "split": "dev"
+ },
+ {
+  "text": "what version of the frontend is running",
+  "action": "status",
+  "split": "test"
+ },
+ {
+  "text": "check whether api is up in prod",
+  "action": "status",
+  "split": "dev"
+ },
+ {
+  "text": "what's the weather today",
+  "action": "unknown",
+  "split": "dev"
+ },
+ {
+  "text": "write me a poem about kubernetes",
+  "action": "unknown",
+  "split": "test"
+ },
+ {
+  "text": "hello",
+  "action": "unknown",
+  "split": "dev"
+ },
+ {
+  "text": "how do I center a div",
+  "action": "unknown",
+  "split": "test"
+ },
+ {
+  "text": "delete the production database",
+  "action": "unknown",
+  "split": "dev"
+ },
+ {
+  "text": "create a new github repo",
+  "action": "unknown",
+  "split": "test"
+ },
+ {
+  "text": "what time is it",
+  "action": "unknown",
+  "split": "dev"
+ },
+ {
+  "text": "open a pull request for my branch",
+  "action": "unknown",
+  "split": "test"
+ },
+ {
+  "text": "send an email to the team",
+  "action": "unknown",
+  "split": "dev"
+ },
+ {
+  "text": "explain what a pod is",
+  "action": "unknown",
+  "split": "test"
+ },
+ {
+  "text": "order pizza",
+  "action": "unknown",
+  "split": "dev"
+ },
+ {
+  "text": "merge main into my branch",
+  "action": "unknown",
+  "split": "test"
+ },
+ {
+  "text": "run the unit tests",
+  "action": "unknown",
+  "split": "dev"
+ },
+ {
+  "text": "who wrote this code",
+  "action": "unknown",
+  "split": "test"
+ },
+ {
+  "text": "make it faster",
+  "action": "unknown",
+  "split": "dev"
+ }
+]

@@ -153,6 +153,27 @@ export class GitHubActionsService {
     return data;
   }
 
+  async cancelRun(runId: number) {
+    if (!this.octokit) {throw new Error('GitHub not authenticated');}
+    await this.octokit.rest.actions.cancelWorkflowRun({ owner: this.owner, repo: this.repo, run_id: runId });
+  }
+
+  /** Plain-text logs of every job in the run (GitHub serves them via a redirect Octokit follows). */
+  async getRunLogs(runId: number): Promise<string> {
+    if (!this.octokit) {throw new Error('GitHub not authenticated');}
+    const { data } = await this.octokit.rest.actions.listJobsForWorkflowRun({
+      owner: this.owner, repo: this.repo, run_id: runId,
+    });
+    const parts: string[] = [];
+    for (const job of data.jobs) {
+      const res = await this.octokit.rest.actions.downloadJobLogsForWorkflowRun({
+        owner: this.owner, repo: this.repo, job_id: job.id,
+      });
+      parts.push(String(res.data));
+    }
+    return parts.join('\n');
+  }
+
   getRunHtmlUrl(run: any) {
     return run?.html_url as string | undefined;
   }

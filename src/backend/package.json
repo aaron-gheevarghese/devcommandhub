@@ -9,7 +9,9 @@
     "start": "node dist/app.js",
     "test": "jest",
     "clean": "rm -rf dist",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "worker": "ts-node src/worker.ts",
+    "eval:intents": "ts-node src/eval/evaluateIntents.ts"
   },
   "dependencies": {
     "@octokit/rest": "^22.0.0",

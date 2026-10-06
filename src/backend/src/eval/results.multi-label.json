@@ -1,0 +1,243 @@
+{
+ "generated_at": "2026-10-06T23:03:03.196Z",
+ "model": "facebook/bart-large-mnli",
+ "multi_label": true,
+ "dataset": {
+  "total": 110,
+  "dev": 58,
+  "test": 52
+ },
+ "selected_threshold": 0.85,
+ "dev_sweep": [
+  {
+   "t": 0.05,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.1,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.15,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.2,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.25,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.3,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.35,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.4,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.45,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.5,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.55,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.6,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.65,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.7,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.75,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 9,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.8,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.8103448275862069,
+    "wrongExecutions": 8,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.85,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.8275862068965517,
+    "wrongExecutions": 7,
+    "askedInScope": 3,
+    "coverage": 0.82
+   }
+  },
+  {
+   "t": 0.9,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7931034482758621,
+    "wrongExecutions": 6,
+    "askedInScope": 6,
+    "coverage": 0.78
+   }
+  },
+  {
+   "t": 0.95,
+   "dev": {
+    "n": 58,
+    "accuracy": 0.7758620689655172,
+    "wrongExecutions": 5,
+    "askedInScope": 8,
+    "coverage": 0.76
+   }
+  }
+ ],
+ "test": {
+  "regex only, always executes (old)": {
+   "n": 52,
+   "accuracy": 0.5769230769230769,
+   "wrongExecutions": 0,
+   "askedInScope": 22,
+   "coverage": 0.5111111111111111
+  },
+  "grammar only (no model)": {
+   "n": 52,
+   "accuracy": 0.21153846153846154,
+   "wrongExecutions": 0,
+   "askedInScope": 41,
+   "coverage": 0.08888888888888889
+  },
+  "model top-1, no threshold": {
+   "n": 52,
+   "accuracy": 0.7884615384615384,
+   "wrongExecutions": 11,
+   "askedInScope": 0,
+   "coverage": 0.9111111111111111
+  },
+  "action-only gate @ 0.85": {
+   "n": 52,
+   "accuracy": 0.8076923076923077,
+   "wrongExecutions": 8,
+   "askedInScope": 2,
+   "coverage": 0.8888888888888888
+  },
+  "END-TO-END (gate + slots) @ 0.85": {
+   "n": 52,
+   "accuracy": 0.8653846153846154,
+   "wrongExecutions": 1,
+   "askedInScope": 6,
+   "coverage": 0.8444444444444444
+  }
+ },
+ "test_model_top1_in_scope": 0.9111111111111111,
+ "test_accuracy_end_to_end": 0.8653846153846154,
+ "test_wrong_executions_end_to_end": 1
+}

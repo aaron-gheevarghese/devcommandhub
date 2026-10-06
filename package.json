@@ -37,10 +37,10 @@
         },
         "devcommandhub.confidenceThreshold": {
           "type": "number",
-          "default": 0.6,
+          "default": 0.4,
           "minimum": 0,
           "maximum": 1,
-          "description": "Minimum entailment score (0–1) required to accept an NLU-predicted action."
+          "description": "Minimum model score (0–1) to run an action without asking. 0.4 was selected by the backend's eval:intents script; lower runs more commands automatically, higher asks more often."
         }
       }
     },
