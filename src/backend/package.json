@@ -11,7 +11,8 @@
     "clean": "rm -rf dist",
     "type-check": "tsc --noEmit",
     "worker": "ts-node src/worker.ts",
-    "eval:intents": "ts-node src/eval/evaluateIntents.ts"
+    "eval:intents": "ts-node src/eval/evaluateIntents.ts",
+    "verify:jobs": "ts-node scripts/verifyJobSystem.ts"
   },
   "dependencies": {
     "@octokit/rest": "^22.0.0",

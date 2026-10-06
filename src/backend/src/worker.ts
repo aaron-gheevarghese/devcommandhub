@@ -45,7 +45,7 @@ export class JobWorker {
   private lastError: string | null = null;
 
   constructor(opts: WorkerOptions = {}) {
-    this.workerId = opts.workerId ?? `${os.hostname()}:${process.pid}`;
+    this.workerId = opts.workerId ?? process.env.WORKER_ID ?? `${os.hostname()}:${process.pid}`;
     this.pollIntervalMs = opts.pollIntervalMs ?? Number(process.env.WORKER_POLL_INTERVAL || 2000);
     this.maxConcurrent = opts.maxConcurrent ?? Number(process.env.MAX_CONCURRENT_JOBS || 4);
     this.maxPerUser = opts.maxPerUser ?? Number(process.env.MAX_JOBS_PER_USER || 2);

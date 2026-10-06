@@ -24,6 +24,8 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS github_token_enc TEXT;
 -- The extension identifies users by a per-install UUID (there is no Supabase Auth login),
 -- so user_id must not be tied to auth.users.
 ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_user_id_fkey;
+-- Legacy rows created before user ids were required get a placeholder owner
+UPDATE jobs SET user_id = '00000000-0000-0000-0000-000000000000' WHERE user_id IS NULL;
 ALTER TABLE jobs ALTER COLUMN user_id SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs (status, priority DESC, created_at ASC);
