@@ -45,7 +45,7 @@ function loadServicesFromConfig(): string[] {
 
 const VALID_SERVICES = loadServicesFromConfig();
 
-// ✅ Match user input against ops.yml service list
+// Match user input against the target repo's service list
 function extractServiceToken(command: string, services: string[] = VALID_SERVICES): string | null {
   if (!services.length) {return null;}
 
