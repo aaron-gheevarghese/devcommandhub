@@ -21,7 +21,9 @@
 #       dockerfile: Dockerfile  # relative to context (default Dockerfile)
 #       manifests: k8s/api      # optional dir applied on deploy; `image: DCH_IMAGE` is replaced
 #       deployment: api         # default: service name
-#       port: 8080              # used when creating a deployment without manifests
+#       port: 8080              # container port (services without manifests)
+#       command: uvicorn app:app --port 8080   # start command (services without manifests)
+#       env: { LOG_LEVEL: info }               # plain env vars (services without manifests)
 #   environments:
 #     staging: { namespace: my-staging }   # default namespace: dch-<environment>
 set -euo pipefail
@@ -91,6 +93,7 @@ if [[ -n "$SERVICE" ]]; then
   PREBUILT="$(cfg "$S.image")"
   MANIFESTS="$(cfg "$S.manifests")"
   PORT="$(cfg "$S.port")"
+  COMMAND="$(cfg "$S.command")"
   [[ -n "$CONTEXT" || -n "$PREBUILT" ]] || die "Service '$SERVICE' needs either 'context' or 'image' in .devcommandhub.yml"
 fi
 
@@ -124,6 +127,27 @@ build_image() { # <tag> <context dir>
   echo "$image"
 }
 
+# Deployment for services without manifests, built from .devcommandhub.yml (command, env, port).
+# replicas is omitted so re-applying keeps the current scale.
+generated_deployment() { # <image>
+  local env_json
+  env_json="$(yq -o=json "$S.env // {} | to_entries | map({\"name\": .key, \"value\": (.value | tostring)})" "$CONFIG")"
+  jq -n --arg name "$DEPLOY" --arg image "$1" --arg cmd "$COMMAND" --arg port "$PORT" --argjson env "$env_json" '{
+    apiVersion: "apps/v1", kind: "Deployment",
+    metadata: { name: $name, labels: { app: $name, "app.kubernetes.io/managed-by": "devcommandhub" } },
+    spec: {
+      revisionHistoryLimit: 10,
+      selector: { matchLabels: { app: $name } },
+      template: {
+        metadata: { labels: { app: $name } },
+        spec: { containers: [ ({ name: $name, image: $image, imagePullPolicy: "IfNotPresent", env: $env }
+          + (if $cmd != "" then { command: ["sh", "-c", $cmd] } else {} end)
+          + (if $port != "" then { ports: [ { containerPort: ($port | tonumber) } ] } else {} end)) ] }
+      }
+    }
+  }'
+}
+
 deploy_version() { # <tag> <context dir>
   local tag="$1" ctx="$2" image container
   image="$(build_image "$tag" "$ctx" | tail -n1)"
@@ -134,10 +158,12 @@ deploy_version() { # <tag> <context dir>
       sed "s|DCH_IMAGE|$image|g" "$f" | kubectl -n "$NS" apply -f -
     done < <(find "$ROOT/$MANIFESTS" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
   fi
-  if ! deployment_exists; then
-    step "Creating deployment $DEPLOY"
-    kubectl -n "$NS" create deployment "$DEPLOY" --image="$image" ${PORT:+--port="$PORT"}
-    [[ -n "$PORT" ]] && kubectl -n "$NS" expose deployment "$DEPLOY" --port=80 --target-port="$PORT" >/dev/null 2>&1 || true
+  if [[ -z "$MANIFESTS" ]]; then
+    step "Applying deployment $DEPLOY"
+    generated_deployment "$image" | kubectl -n "$NS" apply -f -
+    if [[ -n "$PORT" ]] && ! kubectl -n "$NS" get service "$DEPLOY" >/dev/null 2>&1; then
+      kubectl -n "$NS" expose deployment "$DEPLOY" --port=80 --target-port="$PORT"
+    fi
   fi
   container="$(kubectl -n "$NS" get deployment "$DEPLOY" -o jsonpath='{.spec.template.spec.containers[0].name}')"
   if [[ "$(current_image)" != "$image" ]]; then

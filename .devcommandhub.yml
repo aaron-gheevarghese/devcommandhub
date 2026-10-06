@@ -7,6 +7,11 @@ services:
   frontend:
     context: services/frontend
     manifests: k8s/frontend
+  heartbeat:
+    image: busybox:1.36
+    command: 'while true; do echo "heartbeat from $GREETING"; sleep 5; done'
+    env:
+      GREETING: devcommandhub
 environments:
   development: { namespace: dch-development }
   staging: { namespace: dch-staging }
