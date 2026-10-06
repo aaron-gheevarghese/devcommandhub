@@ -15,6 +15,11 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS locked_by TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS external_url TEXT;
+-- Which GitHub repo the job acts on, and the user's GitHub token (AES-GCM encrypted by the
+-- backend; cleared when the job finishes)
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS target_repo TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS target_ref TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS github_token_enc TEXT;
 
 -- The extension identifies users by a per-install UUID (there is no Supabase Auth login),
 -- so user_id must not be tied to auth.users.

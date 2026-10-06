@@ -41,6 +41,16 @@ export class GitHubActionsService {
     await this.octokit.rest.users.getAuthenticated();
   }
 
+  setRef(ref: string) {
+    this.ref = ref;
+  }
+
+  async getDefaultBranch(): Promise<string> {
+    if (!this.octokit) {throw new Error('GitHub not authenticated');}
+    const { data } = await this.octokit.rest.repos.get({ owner: this.owner, repo: this.repo });
+    return data.default_branch;
+  }
+
   async validateScopes() {
     if (!this.octokit) {throw new Error("GitHub not authenticated");}
     const { headers } = await this.octokit.request("GET /user");

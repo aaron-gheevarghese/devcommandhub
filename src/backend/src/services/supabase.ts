@@ -23,6 +23,9 @@ export interface Job {
   external_job_id?: string;
   external_url?: string;
   execution_mode?: ExecutionMode;
+  target_repo?: string | null;   // "owner/name"
+  target_ref?: string | null;
+  github_token_enc?: string | null;
   locked_by?: string | null;
   heartbeat_at?: string | null;
   cancel_requested?: boolean;
@@ -50,6 +53,9 @@ export interface CreateJobData {
   parsed_intent: any;
   job_type: string;
   execution_mode: ExecutionMode;
+  target_repo?: string | null;
+  target_ref?: string | null;
+  github_token_enc?: string | null;
   max_retries?: number;
 }
 
@@ -104,6 +110,9 @@ export class SupabaseService {
           parsed_intent: jobData.parsed_intent,
           job_type: jobData.job_type,
           execution_mode: jobData.execution_mode,
+          target_repo: jobData.target_repo ?? null,
+          target_ref: jobData.target_ref ?? null,
+          github_token_enc: jobData.github_token_enc ?? null,
           status: 'queued',
           output: [],
           logs: [],                // JSONB array matches your schema default
@@ -156,9 +165,11 @@ export class SupabaseService {
     to: JobStatus,
     fields: Partial<Pick<Job, 'output' | 'error_message' | 'external_job_id' | 'external_url'>> = {}
   ): Promise<boolean> {
+    // Drop the stored GitHub token as soon as a job can no longer run
+    const extra = TERMINAL_STATUSES.includes(to) ? { github_token_enc: null } : {};
     const { data, error } = await this.supabase
       .from('jobs')
-      .update({ status: to, ...fields })
+      .update({ status: to, ...fields, ...extra })
       .eq('id', jobId)
       .eq('status', from)
       .select('id');
@@ -243,7 +254,7 @@ export class SupabaseService {
     try {
       let query = this.supabase
         .from('jobs')
-        .select('id, original_command, job_type, status, execution_mode, created_at, updated_at, completed_at, external_job_id, external_url')
+        .select('id, original_command, job_type, status, execution_mode, target_repo, created_at, updated_at, completed_at, external_job_id, external_url')
         .eq('user_id', userId);
       if (status) {query = query.eq('status', status);}
       const { data, error } = await query

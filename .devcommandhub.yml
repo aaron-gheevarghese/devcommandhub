@@ -1,0 +1,13 @@
+# DevCommandHub config: which services natural-language commands can act on.
+# See scripts/k8s-ops.sh for all options.
+services:
+  api:
+    context: services/api
+    manifests: k8s/api
+  frontend:
+    context: services/frontend
+    manifests: k8s/frontend
+environments:
+  development: { namespace: dch-development }
+  staging: { namespace: dch-staging }
+  production: { namespace: dch-production }

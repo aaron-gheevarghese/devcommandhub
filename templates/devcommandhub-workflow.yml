@@ -1,0 +1,38 @@
+name: DevCommandHub
+
+# Added by "DevCommandHub: Set Up This Repo". The DevCommandHub backend dispatches
+# this workflow; the work happens in the reusable workflow it calls.
+# Optional: add a KUBECONFIG repository secret to target your own cluster
+# (otherwise each run uses a throwaway kind sandbox cluster).
+on:
+  workflow_dispatch:
+    inputs:
+      job_id: { description: DevCommandHub job id, required: true }
+      action:
+        description: Operation
+        required: true
+        type: choice
+        options: [deploy, rollback, scale, restart, logs, status]
+      service: { description: Service from .devcommandhub.yml, required: false }
+      environment: { description: Target environment, required: false, default: development }
+      replicas: { description: Replica count (scale), required: false }
+      tail: { description: Log lines (logs), required: false, default: "100" }
+      original_command: { description: Natural-language command, required: false }
+
+# The DevCommandHub backend finds this run by the "DCH <job_id> " prefix.
+run-name: DCH ${{ inputs.job_id }} - ${{ inputs.action }} ${{ inputs.service }} @ ${{ inputs.environment }}
+
+permissions:
+  contents: read
+  packages: write # push images to GHCR when deploying to your own cluster
+
+jobs:
+  ops:
+    uses: aaron-gheevarghese/devcommandhub/.github/workflows/dch-ops.yml@main
+    with:
+      action: ${{ inputs.action }}
+      service: ${{ inputs.service }}
+      environment: ${{ inputs.environment }}
+      replicas: ${{ inputs.replicas }}
+      tail: ${{ inputs.tail }}
+    secrets: inherit

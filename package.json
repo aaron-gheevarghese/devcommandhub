@@ -20,6 +20,10 @@
       {
         "command": "devcommandhub.setApiBase",
         "title": "DevCommandHub: Set API Base URL"
+      },
+      {
+        "command": "devcommandhub.setupRepo",
+        "title": "DevCommandHub: Set Up This Repo"
       }
     ],
     "configuration": {
@@ -40,7 +44,12 @@
           "default": 0.4,
           "minimum": 0,
           "maximum": 1,
-          "description": "Minimum model score (0–1) to run an action without asking. 0.4 was selected by the backend's eval:intents script; lower runs more commands automatically, higher asks more often."
+          "description": "Minimum model score (0\u20131) to run an action without asking. 0.4 was selected by the backend's eval:intents script; lower runs more commands automatically, higher asks more often."
+        },
+        "devcommandhub.githubToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional GitHub token. Leave empty to use VS Code's GitHub sign-in."
         }
       }
     },
@@ -55,12 +64,7 @@
         "key": "ctrl+shift+alt+a",
         "mac": "cmd+shift+alt+a"
       }
-    ],
-    "githubToken": {
-      "type": "string",
-      "default": "",
-      "description": "GitHub Personal Access Token for triggering workflows"
-    }
+    ]
   },
   "scripts": {
     "clean": "rimraf out",

@@ -58,39 +58,39 @@ function loadServicesFromOps(): string[] {
   return [];
 }
 
-/** Deployable services = directories under k8s/ (what scripts/k8s-ops.sh can act on). */
-function loadServicesFromK8s(): string[] {
-  const k8sDir = path.resolve(__dirname, "../../../../k8s");
+/** Services declared in this repo's .devcommandhub.yml (fallback when the client sends none). */
+function loadServicesFromConfig(): string[] {
   try {
-    return fs.readdirSync(k8sDir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name.toLowerCase());
+    const doc = yaml.parse(fs.readFileSync(path.resolve(__dirname, "../../../../.devcommandhub.yml"), "utf8"));
+    return Object.keys(doc?.services ?? {}).map(s => s.toLowerCase());
   } catch {
     return [];
   }
 }
 
-const VALID_SERVICES = [...new Set([...loadServicesFromOps(), ...loadServicesFromK8s()])];
+const VALID_SERVICES = [...new Set([...loadServicesFromOps(), ...loadServicesFromConfig()])];
 
 // ✅ Match user input against ops.yml service list
-function extractServiceToken(command: string): string | null {
-  if (!VALID_SERVICES.length) {return null;}
+function extractServiceToken(command: string, services: string[] = VALID_SERVICES): string | null {
+  if (!services.length) {return null;}
 
   const tokens = command.toLowerCase().split(/[^a-z0-9.-]+/).filter(Boolean);
 
   // Exact match first
   for (const token of tokens) {
-    if (VALID_SERVICES.includes(token)) {return token;}
+    if (services.includes(token)) {return token;}
   }
 
   // Partial prefix/suffix match ("front" -> "frontend"); ignore short filler tokens
   for (const token of tokens.filter(t => t.length >= 3)) {
-    const found = VALID_SERVICES.find(s => s.startsWith(token) || s.endsWith(token));
+    const found = services.find(s => s.startsWith(token) || s.endsWith(token));
     if (found) {return found;}
   }
 
   return null;
 }
 
-export function regexParse(command: string): ParsedIntent {
+export function regexParse(command: string, services?: string[]): ParsedIntent {
   const c = command.toLowerCase();
 
   // Match environments
@@ -105,7 +105,7 @@ export function regexParse(command: string): ParsedIntent {
     if (match?.[1]) { environment = match[1]; break; }
   }
 
-  const service = extractServiceToken(c);
+  const service = extractServiceToken(c, services?.length ? services : VALID_SERVICES);
 
   // Replicas
   const replicaPatterns = [
@@ -306,10 +306,16 @@ export function decideAction(
   return { action: looseAction, confidence: guess.length ? 0.5 : 0, source: "regex-guess", needs_confirmation: true, candidates: guess };
 }
 
-export async function parseCommand(opts: { command: string; hfApiKey: string | null; confidenceThreshold?: number; }): Promise<ParsedIntent> {
-  const { command, hfApiKey, confidenceThreshold = DEFAULT_CONFIDENCE_THRESHOLD } = opts;
+export async function parseCommand(opts: {
+  command: string;
+  hfApiKey: string | null;
+  confidenceThreshold?: number;
+  /** Services from the target repo's .devcommandhub.yml */
+  services?: string[];
+}): Promise<ParsedIntent> {
+  const { command, hfApiKey, confidenceThreshold = DEFAULT_CONFIDENCE_THRESHOLD, services } = opts;
   const normalized = command.toLowerCase().trim();
-  const coarse = regexParse(normalized);
+  const coarse = regexParse(normalized, services);
   const model = DEFAULT_HF_MODEL;
 
   let ranked: RankedAction[] | null = null;
@@ -334,7 +340,7 @@ export async function parseCommand(opts: { command: string; hfApiKey: string | n
     source: error ? `${d.source} (hf-error)` : d.source,
     needs_confirmation: d.needs_confirmation,
     candidates: d.candidates,
-    debug: { model, threshold: confidenceThreshold, rankedActions: ranked ?? [], validServices: VALID_SERVICES },
+    debug: { model, threshold: confidenceThreshold, rankedActions: ranked ?? [], validServices: services?.length ? services : VALID_SERVICES },
     ...(error ? { error } : {}),
   };
 }

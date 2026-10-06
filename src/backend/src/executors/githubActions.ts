@@ -1,11 +1,13 @@
 // src/backend/src/executors/githubActions.ts
-// Dispatches .github/workflows/ops.yml, which spins up a kind cluster on the runner
-// and runs scripts/k8s-ops.sh. Lines the script prints with the "DCH|" prefix are
+// Dispatches .github/workflows/devcommandhub.yml in the job's target repo (the user's repo).
+// That stub calls the reusable dch-ops.yml workflow, which runs scripts/k8s-ops.sh against
+// the repo's cluster (or a kind sandbox). Lines the script prints with the "DCH|" prefix are
 // pulled back into the job output once the run finishes.
 import { GitHubActionsService, mapGaToDchStatus } from '../services/githubService';
+import { decryptToken } from '../services/tokenVault';
 import type { Executor, ExecutionContext, ExecutionResult } from './types';
 
-const WORKFLOW_FILE = process.env.GH_WORKFLOW_FILE || 'ops.yml';
+const WORKFLOW_FILE = process.env.GH_WORKFLOW_FILE || 'devcommandhub.yml';
 const POLL_MS = Number(process.env.GH_POLL_INTERVAL_MS || 5000);
 const RUN_TIMEOUT_MS = Number(process.env.GH_RUN_TIMEOUT_MS || 20 * 60 * 1000);
 
@@ -28,8 +30,12 @@ export const githubActionsExecutor: Executor = {
   mode: 'github_actions',
   async execute(ctx: ExecutionContext): Promise<ExecutionResult> {
     const { job, intent, signal } = ctx;
-    const gh = new GitHubActionsService();
-    await gh.authenticate(); // GITHUB_API_KEY / GH_TOKEN from the worker's env
+    // Target repo: the user's repo sent by the extension, else the one configured in .env
+    const [owner, repo] = (job.target_repo || `${process.env.GH_REPO_OWNER}/${process.env.GH_REPO_NAME}`).split('/');
+    const gh = new GitHubActionsService(undefined, owner, repo);
+    // The user's own GitHub token (from VS Code sign-in), else GITHUB_API_KEY from .env
+    await gh.authenticate(job.github_token_enc ? decryptToken(job.github_token_enc) : undefined);
+    gh.setRef(job.target_ref || await gh.getDefaultBranch());
 
     const inputs = {
       job_id: job.id,
@@ -38,12 +44,18 @@ export const githubActionsExecutor: Executor = {
       environment: intent.environment || 'development',
       replicas: intent.replicas != null ? String(intent.replicas) : '',
       tail: String(intent.parameters?.tail ?? 100),
-      user_id: job.user_id,
       original_command: job.original_command.slice(0, 200),
     };
 
-    await gh.dispatch(WORKFLOW_FILE, inputs);
-    ctx.log(`Dispatched GitHub Actions workflow ${WORKFLOW_FILE}`, 'Waiting for the run to start...');
+    try {
+      await gh.dispatch(WORKFLOW_FILE, inputs);
+    } catch (e: any) {
+      if (e?.status === 404) {
+        return { success: false, error: `${owner}/${repo} has no .github/workflows/${WORKFLOW_FILE} on its default branch. Run "DevCommandHub: Set Up This Repo" in VS Code, then commit and push.` };
+      }
+      throw e;
+    }
+    ctx.log(`Dispatched ${WORKFLOW_FILE} in ${owner}/${repo}`, 'Waiting for the run to start...');
 
     const run = await gh.findRunByName(WORKFLOW_FILE, `DCH ${job.id} `);
     const url = gh.getRunHtmlUrl(run);

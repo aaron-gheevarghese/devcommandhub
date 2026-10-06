@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: dch/frontend:IMAGE_TAG
+          image: DCH_IMAGE  # replaced with the built image on deploy
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80

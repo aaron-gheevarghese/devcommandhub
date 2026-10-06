@@ -13,6 +13,7 @@ import { supabaseService, supabaseAdmin, type ExecutionMode } from './services/s
 import { commandParser, validateIntent } from './services/commandParser';
 import { parseCommand as parseWithNLU, DEFAULT_CONFIDENCE_THRESHOLD } from './services/nluService';
 import { JobWorker } from './worker';
+import { encryptToken } from './services/tokenVault';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -25,7 +26,8 @@ const DEFAULT_EXECUTION_MODE: ExecutionMode =
   (EXECUTION_MODES as string[]).includes(process.env.JOB_EXECUTOR ?? '')
     ? (process.env.JOB_EXECUTOR as ExecutionMode)
     : process.env.USE_GITHUB_ACTIONS === 'true' ? 'github_actions' : 'simulation';
-const GITHUB_WORKFLOW_FILE = process.env.GH_WORKFLOW_FILE || 'ops.yml';
+const GITHUB_WORKFLOW_FILE = process.env.GH_WORKFLOW_FILE || 'devcommandhub.yml';
+const GH_NAME = /^[A-Za-z0-9_.-]{1,100}$/;
 
 // The worker runs in-process by default; set RUN_WORKER=false and use `npm run worker` to split it out.
 const worker = process.env.RUN_WORKER === 'false' ? null : new JobWorker();
@@ -127,6 +129,12 @@ function extractHfApiKey(req: express.Request): string | null {
     hfApiKey = process.env.HF_API_KEY;
   }
   return hfApiKey;
+}
+
+// The user's GitHub token (VS Code GitHub sign-in), sent per request
+function extractGitHubToken(req: express.Request): string | null {
+  const t = (req.get('X-GitHub-Token') || '').trim();
+  return t || null;
 }
 
 // ✅ Server-side client hints (simple heuristics)
@@ -267,6 +275,26 @@ app.post('/api/commands', async (req, res) => {
     }
     const executionMode: ExecutionMode = requestedMode ?? DEFAULT_EXECUTION_MODE;
 
+    // Target repo = the repo open in the user's VS Code (falls back to GH_REPO_OWNER/NAME)
+    const repo = req.body?.repo;
+    let targetRepo: string | null = null;
+    let targetRef: string | null = null;
+    if (repo !== undefined && repo !== null) {
+      if (!GH_NAME.test(String(repo.owner ?? '')) || !GH_NAME.test(String(repo.name ?? ''))) {
+        return jsonError(res, 400, 'BAD_REQUEST', 'repo must be { owner, name, ref? }');
+      }
+      targetRepo = `${repo.owner}/${repo.name}`;
+      if (typeof repo.ref === 'string' && /^[A-Za-z0-9_./-]{1,200}$/.test(repo.ref)) {targetRef = repo.ref;}
+    }
+    const githubToken = extractGitHubToken(req);
+    const envRepo = `${process.env.GH_REPO_OWNER}/${process.env.GH_REPO_NAME}`;
+    if (executionMode === 'github_actions' && targetRepo && targetRepo !== envRepo && !githubToken) {
+      return jsonError(res, 400, 'MISSING_GITHUB_TOKEN', `Sign in to GitHub in VS Code so DevCommandHub can run workflows in ${targetRepo}`);
+    }
+    const services = Array.isArray(req.body?.services)
+      ? req.body.services.filter((x: unknown) => typeof x === 'string' && /^[a-z0-9-]{1,63}$/.test(x))
+      : undefined;
+
     // Decide NLU usage + threshold
     const nluOn = typeof enableNLU === "boolean" ? enableNLU : true;
     const thresh =
@@ -288,7 +316,7 @@ app.post('/api/commands', async (req, res) => {
 
     // Parse with NLU/regex
     // NLU off = grammar/regex only (same confidence gate, no model scores)
-    parsedIntent = await parseWithNLU({ command, hfApiKey: nluOn ? hfApiKey : null, confidenceThreshold: thresh });
+    parsedIntent = await parseWithNLU({ command, hfApiKey: nluOn ? hfApiKey : null, confidenceThreshold: thresh, services });
 
     console.log('[API] Initial parsed intent:', parsedIntent);
 
@@ -363,6 +391,9 @@ app.post('/api/commands', async (req, res) => {
       parsed_intent: intent,
       job_type: intent.action,
       execution_mode: executionMode,
+      target_repo: targetRepo,
+      target_ref: targetRef,
+      github_token_enc: executionMode === 'github_actions' && githubToken ? encryptToken(githubToken) : null,
     });
 
     // jobs.user_id references auth.users; the extension sends a random per-install UUID
@@ -375,6 +406,9 @@ app.post('/api/commands', async (req, res) => {
         parsed_intent: intent,
         job_type: intent.action,
         execution_mode: executionMode,
+        target_repo: targetRepo,
+        target_ref: targetRef,
+        github_token_enc: executionMode === 'github_actions' && githubToken ? encryptToken(githubToken) : null,
       });
     }
 
@@ -397,6 +431,7 @@ app.post('/api/commands', async (req, res) => {
       status: job.status,
       created_at: job.created_at,
       execution_method: executionMode,
+      target_repo: targetRepo ?? envRepo,
     });
 
   } catch (error: any) {
@@ -430,6 +465,7 @@ app.get('/api/jobs/:id', async (req, res) => {
         external_job_id: job.external_job_id,
         external_url: job.external_url,
         execution_mode: job.execution_mode,
+        target_repo: job.target_repo,
         cancel_requested: job.cancel_requested,
         retry_count: job.retry_count,
         locked_by: job.locked_by,
@@ -494,6 +530,7 @@ app.get('/api/jobs', async (req, res) => {
         updated_at: j.updated_at,
         completed_at: j.completed_at,
         execution_mode: j.execution_mode,
+        target_repo: j.target_repo,
         external_job_id: j.external_job_id,
         external_url: j.external_url,
       })),

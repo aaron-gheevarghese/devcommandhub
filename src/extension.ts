@@ -1,7 +1,9 @@
 // src/extension.ts — Day 8: NLU flags + client_hints + replicas UI
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'path';
 import { randomUUID } from 'crypto';
+import * as YAML from 'yaml';
 
 // ---- User & API types ----
 interface VSCodeUser {
@@ -24,6 +26,7 @@ interface JobResponse {
   status: string;
   created_at: string;
   execution_method?: string;
+  target_repo?: string;
 }
 
 interface JobDetails {
@@ -39,6 +42,20 @@ interface JobDetails {
   cancel_requested?: boolean;
   created_at: string;
   updated_at: string;
+}
+
+/** GitHub repo of the open workspace: where commands run */
+interface TargetRepo {
+  owner: string;
+  name: string;
+  ref?: string;
+  root: vscode.Uri;
+}
+
+/** owner/name from https://github.com/o/r(.git) or git@github.com:o/r(.git) */
+function parseGitHubRemote(url?: string): { owner: string; name: string } | null {
+  const m = url?.match(/github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i);
+  return m ? { owner: m[1], name: m[2] } : null;
 }
 
 interface ApiEnvironment {
@@ -362,6 +379,7 @@ class DevCommandHubProvider implements vscode.Disposable {
         status: response.status,
         created_at: response.created_at,
         execution_method: response.execution_method,
+        target_repo: response.target_repo,
         original_command: command
       };
 
@@ -567,13 +585,98 @@ class DevCommandHubProvider implements vscode.Disposable {
   }
 
   
-// Add this method to the DevCommandHubProvider class, after getHFHeaders():
+  // ---- Target repo (the user's own repo) ----
+  async getTargetRepo(): Promise<TargetRepo | null> {
+    const gitExt = vscode.extensions.getExtension<any>('vscode.git');
+    if (!gitExt) { return null; }
+    const git = (gitExt.isActive ? gitExt.exports : await gitExt.activate()).getAPI(1);
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const repo = git.repositories.find((r: any) => folder && folder.startsWith(r.rootUri.fsPath)) ?? git.repositories[0];
+    if (!repo) { return null; }
+    const remotes: any[] = repo.state.remotes ?? [];
+    const remote = remotes.find(r => r.name === 'origin') ?? remotes[0];
+    const parsed = parseGitHubRemote(remote?.fetchUrl ?? remote?.pushUrl);
+    if (!parsed) { return null; }
+    const head = repo.state.HEAD;
+    // Only dispatch on the current branch if it exists on GitHub; otherwise the default branch
+    return { ...parsed, ref: head?.upstream ? head.name : undefined, root: repo.rootUri };
+  }
 
-private getGitHubHeaders(): Record<string, string> {
-  const token = vscode.workspace.getConfiguration('devcommandhub')
-    .get<string>('githubToken', '')?.trim();
-  return token ? { 'X-GitHub-Token': token } : {};
-}
+  private readRepoServices(root: vscode.Uri): string[] | undefined {
+    try {
+      const doc = YAML.parse(fs.readFileSync(path.join(root.fsPath, '.devcommandhub.yml'), 'utf8'));
+      return Object.keys(doc?.services ?? {});
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** User's GitHub token: VS Code's built-in GitHub sign-in (or the githubToken setting). */
+  private async getGitHubToken(): Promise<string | undefined> {
+    const fromSettings = vscode.workspace.getConfiguration('devcommandhub').get<string>('githubToken', '')?.trim();
+    if (fromSettings) { return fromSettings; }
+    const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone: true });
+    return session?.accessToken;
+  }
+
+  /** Add the workflow stub + .devcommandhub.yml to the open repo. */
+  async setupRepo() {
+    const target = await this.getTargetRepo();
+    const root = target?.root ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) {
+      vscode.window.showErrorMessage('DevCommandHub: open your project folder first.');
+      return;
+    }
+
+    const workflowPath = path.join(root.fsPath, '.github', 'workflows', 'devcommandhub.yml');
+    const configPath = path.join(root.fsPath, '.devcommandhub.yml');
+    const written: string[] = [];
+
+    if (!fs.existsSync(workflowPath)) {
+      const template = fs.readFileSync(vscode.Uri.joinPath(this.context.extensionUri, 'templates', 'devcommandhub-workflow.yml').fsPath, 'utf8');
+      fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
+      fs.writeFileSync(workflowPath, template);
+      written.push('.github/workflows/devcommandhub.yml');
+    }
+
+    if (!fs.existsSync(configPath)) {
+      // One service per Dockerfile found in the repo
+      const dockerfiles = await vscode.workspace.findFiles(
+        new vscode.RelativePattern(root, '**/Dockerfile'), '{**/node_modules/**,**/.git/**,**/vendor/**}', 30);
+      const services: Record<string, any> = {};
+      for (const f of dockerfiles) {
+        const dir = path.relative(root.fsPath, path.dirname(f.fsPath)) || '.';
+        const base = dir === '.' ? (target?.name ?? path.basename(root.fsPath)) : path.basename(dir);
+        let name = base.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'app';
+        while (services[name]) { name += '-2'; }
+        services[name] = { context: dir, port: 8080 };
+      }
+      const header = [
+        '# DevCommandHub: services that natural-language commands can act on.',
+        '# Per service: context (docker build dir) or image (prebuilt), dockerfile, manifests (k8s dir,',
+        '# `image: DCH_IMAGE` is replaced on deploy), deployment (name in the cluster), port.',
+        '# Without a KUBECONFIG repo secret, runs use a throwaway kind sandbox cluster.',
+        '',
+      ].join('\n');
+      const body = YAML.stringify({
+        services: Object.keys(services).length ? services : { app: { context: '.', port: 8080 } },
+        environments: { development: { namespace: 'dch-development' }, staging: { namespace: 'dch-staging' }, production: { namespace: 'dch-production' } },
+      });
+      fs.writeFileSync(configPath, header + body);
+      written.push('.devcommandhub.yml');
+    }
+
+    if (!written.length) {
+      vscode.window.showInformationMessage('DevCommandHub is already set up in this repo.');
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(configPath);
+    await vscode.window.showTextDocument(doc);
+    vscode.window.showInformationMessage(
+      `DevCommandHub added ${written.join(' and ')}${target ? ` to ${target.owner}/${target.name}` : ''}. ` +
+      'Check the services, then commit and push to your default branch.'
+    );
+  }
 
 // Update the sendCommandToAPI method to include GitHub headers:
 private async sendCommandToAPI(
@@ -596,8 +699,12 @@ private async sendCommandToAPI(
   // Add HF headers from settings
   Object.assign(headers, this.getHFHeaders());
   
-  // NEW: Add GitHub headers from settings
-  Object.assign(headers, this.getGitHubHeaders());
+  // Commands run in the GitHub repo open in this window, as the signed-in user
+  const target = await this.getTargetRepo();
+  if (target) {
+    const token = await this.getGitHubToken();
+    if (token) { headers['X-GitHub-Token'] = token; }
+  }
 
     // client-side hints (replicas, etc.)
     const clientHints = parseClientHints(command);
@@ -609,6 +716,10 @@ private async sendCommandToAPI(
       clientHints,
       ...(typeof confidenceThreshold === 'number' ? { confidenceThreshold } : {}),
       ...(userId && validUUID(userId) ? { user_id: userId } : { user_id: this.getStableUserId() }),
+      ...(target ? {
+        repo: { owner: target.owner, name: target.name, ref: target.ref },
+        services: this.readRepoServices(target.root),
+      } : {}),
     };
 
     if (opts?.slotOverrides) {
@@ -1120,6 +1231,7 @@ private getControllerScript(nonce: string): string {
           ? '<strong>Replicas:</strong> ' + resp.parsed_intent.replicas + '<br>'
           : '') +
         '<strong>Created:</strong> ' + new Date(resp.created_at).toLocaleString() + '<br>' +
+        (resp.target_repo ? '<strong>Repo:</strong> ' + resp.target_repo + '<br>' : '') +
         '<strong>Runs on:</strong> ' + (resp.execution_method || 'simulation') + '<br>' +
         '<div style="margin-top:8px;"><button class="action-btn refresh-btn" id="refresh-' + resp.job_id + '">🔄 Refresh</button> ' +
         '<button class="action-btn cancel-btn" id="cancel-' + resp.job_id + '">⛔ Cancel</button></div>';
@@ -1295,6 +1407,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('devcommandhub.openWindow', () => provider.openWindow()),
     vscode.commands.registerCommand('devcommandhub.setApiBase', showApiBaseQuickPick),
+    vscode.commands.registerCommand('devcommandhub.setupRepo', () => provider.setupRepo()),
     provider
   );
 }

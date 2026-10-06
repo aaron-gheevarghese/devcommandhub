@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: dch/api:IMAGE_TAG
+          image: DCH_IMAGE  # replaced with the built image on deploy
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
