@@ -1293,11 +1293,12 @@ private getControllerScript(nonce: string): string {
 
     content.querySelectorAll('.output-section, .error-section, .retry-section, .run-link').forEach(function(n){ n.remove(); });
 
-    if (externalUrl && /^https:\/\/github\.com\//.test(externalUrl)) {
+    if (externalUrl && String(externalUrl).indexOf('https://github.com/') === 0) {
       var link = document.createElement('div');
       link.className = 'run-link';
       var a = document.createElement('a');
       a.href = externalUrl; a.textContent = '🔗 View GitHub Actions run';
+      a.style.color = 'var(--vscode-textLink-foreground, #3794ff)';
       link.appendChild(a);
       content.appendChild(link);
     }
